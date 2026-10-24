@@ -1,0 +1,103 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: palmora-api
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/launch-stage: GA
+    run.googleapis.com/description: "Palmora AI Computer Vision and Readings Engine"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "20"
+        run.googleapis.com/cpu-throttling: "true"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+      - image: gcr.io/PROJECT_ID/palmora-api:latest
+        ports:
+        - name: http1
+          containerPort: 8000
+        resources:
+          limits:
+            cpu: "2000m"
+            memory: "2Gi"
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: UPSTASH_REDIS_REST_URL
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: upstash_redis_rest_url
+        - name: UPSTASH_REDIS_REST_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: upstash_redis_rest_token
+        - name: SUPABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: supabase_url
+        - name: SUPABASE_SERVICE_ROLE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: supabase_service_role_key
+        - name: RAZORPAY_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: razorpay_key_id
+        - name: RAZORPAY_KEY_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: razorpay_key_secret
+        - name: RAZORPAY_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: razorpay_webhook_secret
+        - name: PAYPAL_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: paypal_client_id
+        - name: PAYPAL_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: paypal_client_secret
+        - name: PAYPAL_MODE
+          value: "live"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: palmora-secrets
+              key: secret_key
+        - name: CORS_ORIGINS
+          value: '["https://palmora.ai","https://www.palmora.ai"]'
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 3

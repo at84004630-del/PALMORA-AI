@@ -1,0 +1,17 @@
+node_modules
+apps/web/node_modules
+packages/shared-types/node_modules
+.next
+apps/web/.next
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.git
+.gitignore
+.DS_Store
+coverage
+dist
+packages/shared-types/dist

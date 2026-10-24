@@ -1,0 +1,132 @@
+@import "tailwindcss";
+
+:root {
+  --background: #070913;
+  --foreground: #F1F4F9;
+  --gold-primary: #C8AA6E;
+  --gold-glow: #F2DA9D;
+  --violet-glow: #7C3AED;
+  --midnight-card: #0D1122;
+  --midnight-border: rgba(200, 170, 110, 0.2);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(124, 58, 237, 0.12) 0%, transparent 50%),
+    radial-gradient(circle at 10% 20%, rgba(200, 170, 110, 0.06) 0%, transparent 40%),
+    radial-gradient(circle at 90% 80%, rgba(79, 70, 229, 0.08) 0%, transparent 50%);
+  background-attachment: fixed;
+}
+
+/* Glass Card styling */
+.glass-card {
+  background: rgba(13, 17, 34, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(200, 170, 110, 0.2);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-card-hover {
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card-hover:hover {
+  border-color: rgba(200, 170, 110, 0.45);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 40px 0 rgba(200, 170, 110, 0.12);
+}
+
+/* Subtle gold gradient text */
+.text-gold-gradient {
+  background: linear-gradient(135deg, #F5E6BE 0%, #C8AA6E 50%, #9B783E 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-violet-gradient {
+  background: linear-gradient(135deg, #DDD6FE 0%, #A78BFA 50%, #7C3AED 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Gold CTA Button */
+.btn-gold {
+  background: linear-gradient(135deg, #C8AA6E 0%, #A88746 100%);
+  color: #070913;
+  font-weight: 600;
+  transition: all 0.25s ease;
+  box-shadow: 0 4px 20px rgba(200, 170, 110, 0.25);
+}
+
+.btn-gold:hover {
+  background: linear-gradient(135deg, #DBC086 0%, #B89654 100%);
+  box-shadow: 0 6px 26px rgba(200, 170, 110, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-gold:active {
+  transform: translateY(0);
+}
+
+/* Pulsing radar ring for scanner */
+@keyframes radar-pulse {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+}
+
+.animate-radar {
+  animation: radar-pulse 3s infinite ease-in-out;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #070913;
+}
+::-webkit-scrollbar-thumb {
+  background: #1E243A;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2E3859;
+}
+
+/* Print Stylesheet for High-Quality PDF / Paper Printing */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    background-image: none !important;
+  }
+  .glass-card {
+    background: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    box-shadow: none !important;
+    color: #111827 !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  nav, footer, .print\:hidden {
+    display: none !important;
+  }
+}
+

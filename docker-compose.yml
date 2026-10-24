@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: palmora_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: palmora
+      POSTGRES_USER: palmora
+      POSTGRES_PASSWORD: palmora_dev
+    volumes:
+      - palmora_data:/var/lib/postgresql/data
+      - ./supabase/migrations/000_complete_setup.sql:/docker-entrypoint-initdb.d/001_complete_setup.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palmora -d palmora"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: palmora_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - palmora_redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  api:
+    build: ./services/api
+    container_name: palmora_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://palmora:palmora_dev@postgres:5432/palmora
+      - DATABASE_ENABLED=true
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: palmora_web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  palmora_data:
+    name: palmora_data
+  palmora_redis_data:
+    name: palmora_redis_data

@@ -1,0 +1,18 @@
+{
+  "name": "palmora-ai-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Palmora AI monorepo linking web frontend, shared contracts, and services",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:types": "npm --workspace=@palmora/shared-types run build",
+    "check:types": "npm --workspace=@palmora/shared-types run check:types && npm --workspace=@palmora/web run check:types",
+    "dev:web": "npm --workspace=@palmora/web run dev",
+    "build:web": "npm --workspace=@palmora/shared-types run build && npm --workspace=@palmora/web run build",
+    "test:web": "npm --workspace=@palmora/web test",
+    "test": "npm run test:web"
+  }
+}
