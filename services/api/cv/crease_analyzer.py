@@ -1,6 +1,7 @@
 import math
 import cv2
 import numpy as np
+import heapq
 from typing import Dict, List, Tuple, Optional, Any
 from ..schemas.palm import (
     PalmFeatures,
@@ -512,6 +513,118 @@ def _link_collinear_segments_tangential(
     return merged
 
 
+def _bridge_heart_zone_gap_min_cost(
+    sA: np.ndarray,
+    sB: np.ndarray,
+    crease_map: np.ndarray,
+    max_bridge_gap: float,
+    max_margin: int = 25
+) -> Optional[np.ndarray]:
+    """
+    Computes a minimum-cost ridge path connecting two disjoint segments in the Heart zone
+    along the physical crease valley in crease_map using 2D A* search.
+    """
+    if len(sA) < 2 or len(sB) < 2:
+        return None
+
+    cand_pairs = [
+        (sA[-1], sB[0], False, False),
+        (sA[-1], sB[-1], False, True),
+        (sA[0], sB[0], True, False),
+        (sB[-1], sA[0], True, True),
+    ]
+
+    best_merged = None
+    min_cost = float('inf')
+    h, w = crease_map.shape[:2]
+
+    for p_start, p_end, rev_A, rev_B in cand_pairs:
+        gap = float(math.hypot(p_end[0] - p_start[0], p_end[1] - p_start[1]))
+        if gap > max_bridge_gap or gap < 1.0:
+            continue
+
+        x0, y0 = int(round(p_start[0])), int(round(p_start[1]))
+        x1, y1 = int(round(p_end[0])), int(round(p_end[1]))
+
+        min_x = max(0, min(x0, x1) - max_margin)
+        max_x = min(w - 1, max(x0, x1) + max_margin)
+        min_y = max(0, min(y0, y1) - max_margin)
+        max_y = min(h - 1, max(y0, y1) + max_margin)
+
+        if max_x <= min_x or max_y <= min_y:
+            continue
+
+        sub_crease = crease_map[min_y:max_y+1, min_x:max_x+1].astype(np.float32)
+        cost_grid = 1.0 + 255.0 / (sub_crease + 15.0)
+
+        sx, sy = x0 - min_x, y0 - min_y
+        tx, ty = x1 - min_x, y1 - min_y
+
+        dist = np.full(cost_grid.shape, np.inf, dtype=np.float32)
+        dist[sy, sx] = 0.0
+        parent = {}
+
+        h0 = math.hypot(sx - tx, sy - ty)
+        pq = [(h0, 0.0, sx, sy)]
+        moves = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]
+
+        reached = False
+        while pq:
+            f, d, x, y = heapq.heappop(pq)
+            if (x, y) == (tx, ty):
+                reached = True
+                break
+            if d > dist[y, x]:
+                continue
+            for dx, dy in moves:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx <= (max_x - min_x) and 0 <= ny <= (max_y - min_y):
+                    step_c = math.sqrt(dx*dx + dy*dy) * cost_grid[ny, nx]
+                    if d + step_c < dist[ny, nx]:
+                        dist[ny, nx] = d + step_c
+                        parent[(nx, ny)] = (x, y)
+                        h_est = math.hypot(nx - tx, ny - ty)
+                        heapq.heappush(pq, (d + step_c + h_est, d + step_c, nx, ny))
+
+        if not reached:
+            continue
+
+        curr = (tx, ty)
+        path = []
+        while curr in parent:
+            path.append([float(curr[0] + min_x), float(curr[1] + min_y)])
+            curr = parent[curr]
+        path.append([float(sx + min_x), float(sy + min_y)])
+        path.reverse()
+
+        bridge_pts = np.array(path, dtype=np.float32)
+        partA = sA[::-1] if rev_A else sA
+        partB = sB[::-1] if rev_B else sB
+
+        if len(bridge_pts) > 2:
+            merged_pts = np.vstack([partA, bridge_pts[1:-1], partB])
+        else:
+            merged_pts = np.vstack([partA, partB])
+
+        m_dx = float(np.ptp(merged_pts[:, 0]))
+        m_dy = float(np.ptp(merged_pts[:, 1]))
+        if m_dy > m_dx * 0.85:
+            continue
+
+        diffs = np.diff(merged_pts, axis=0)
+        tot_len = float(np.sum(np.sqrt((diffs**2).sum(axis=1))))
+        chord = float(math.hypot(merged_pts[-1, 0] - merged_pts[0, 0], merged_pts[-1, 1] - merged_pts[0, 1]))
+        if tot_len / max(chord, 1.0) > 1.85:
+            continue
+
+        total_cost = dist[ty, tx]
+        if total_cost < min_cost:
+            min_cost = total_cost
+            best_merged = merged_pts
+
+    return best_merged
+
+
 
 def _extract_creases_hybrid_sota(
     work_img: np.ndarray,
@@ -929,7 +1042,17 @@ def analyze_palm_creases(
             min_cos_tan=0.25 if line_type == "life" else 0.35,
             min_cos_bridge=0.25 if line_type == "life" else 0.30
         )
-        primary_chain = linked[0] if linked else raw_paths[0]
+
+        # Change 2: Minimum-cost-path gap bridging in the heart zone
+        if line_type == "heart" and len(linked) >= 2:
+            max_bridge_gap = max(35.0, float(palm_radius * 0.40))
+            bridged_chain = _bridge_heart_zone_gap_min_cost(linked[0], linked[1], crease_map, max_bridge_gap)
+            if bridged_chain is not None:
+                primary_chain = bridged_chain
+            else:
+                primary_chain = linked[0]
+        else:
+            primary_chain = linked[0] if linked else raw_paths[0]
 
         # Standardize anatomical orientation:
         if line_type == "heart":
