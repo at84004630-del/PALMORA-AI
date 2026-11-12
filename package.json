@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "build": "pnpm --filter @palmora/shared-types run build && pnpm --filter @palmora/web run build",
     "build:types": "npm --workspace=@palmora/shared-types run build",
     "check:types": "npm --workspace=@palmora/shared-types run check:types && npm --workspace=@palmora/web run check:types",
     "dev:web": "npm --workspace=@palmora/web run dev",

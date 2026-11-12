@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "pnpm --filter @palmora/shared-types run build || true",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
