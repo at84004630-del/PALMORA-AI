@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 from typing import Tuple, List
 from ..schemas.palm import ImageQualityMetrics
 
@@ -174,13 +175,20 @@ def validate_palm_image(image_bytes: bytes) -> Tuple[bool, ImageQualityMetrics, 
             center_roi = img[ch_s:ch_e, cw_s:cw_e]
             if center_roi.size > 0:
                 mean_bgr = np.mean(center_roi, axis=(0, 1))
-                std_bgr = np.std(center_roi, axis=(0, 1)) + 22.0
-                lower_bgr = np.clip(mean_bgr - 2.8 * std_bgr, 0, 255).astype(np.uint8)
-                upper_bgr = np.clip(mean_bgr + 2.8 * std_bgr, 0, 255).astype(np.uint8)
-                mask_adaptive = cv2.inRange(img, lower_bgr, upper_bgr)
-                mask_adaptive = cv2.morphologyEx(mask_adaptive, cv2.MORPH_CLOSE, kernel_close, iterations=2)
-                skin_mask = cv2.bitwise_or(skin_mask, mask_adaptive)
-                contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                b_m, g_m, r_m = float(mean_bgr[0]), float(mean_bgr[1]), float(mean_bgr[2])
+                sum_rgb = r_m + g_m + b_m
+                # Only sample center if it exhibits genuine human skin chromaticity
+                if sum_rgb > 50:
+                    rn_m = r_m / sum_rgb
+                    gn_m = g_m / sum_rgb
+                    if (0.33 <= rn_m <= 0.65) and (0.22 <= gn_m <= 0.40) and (r_m > b_m + 8.0):
+                        std_bgr = np.std(center_roi, axis=(0, 1)) + 15.0
+                        lower_bgr = np.clip(mean_bgr - 2.2 * std_bgr, 0, 255).astype(np.uint8)
+                        upper_bgr = np.clip(mean_bgr + 2.2 * std_bgr, 0, 255).astype(np.uint8)
+                        mask_adaptive = cv2.inRange(img, lower_bgr, upper_bgr)
+                        mask_adaptive = cv2.morphologyEx(mask_adaptive, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+                        skin_mask = cv2.bitwise_or(skin_mask, mask_adaptive)
+                        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     hand_detected = False
     palm_visible = False
@@ -206,7 +214,96 @@ def validate_palm_image(image_bytes: bytes) -> Tuple[bool, ImageQualityMetrics, 
                     mean_r_cnt = float(np.mean(cnt_pixels[:, 2]))
                     mean_b_cnt = float(np.mean(cnt_pixels[:, 0]))
                     if mean_r_cnt > mean_b_cnt + 4.5:
-                        hand_detected = True
+                        # Hand Anatomical Verification:
+                        # Differentiates genuine palmar hand anatomy from human faces, heads, necks, clothing, or furniture.
+                        mask_dt = mask_cnt.copy()
+                        mask_dt[0, :] = 0
+                        mask_dt[-1, :] = 0
+                        mask_dt[:, 0] = 0
+                        mask_dt[:, -1] = 0
+                        dist_transform = cv2.distanceTransform(mask_dt, cv2.DIST_L2, 5)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(dist_transform)
+                        pcx, pcy = max_loc
+                        prad = int(max_val)
+
+                        if pcx < 0.05 * w or pcx > 0.95 * w or pcy < 0.05 * h or pcy > 0.95 * h:
+                            issues.append("Hand contour touches image boundary without centered palm.")
+                            guidance.append("Position your open palm centered inside the camera guide.")
+                        else:
+                            peri = cv2.arcLength(largest_cnt, True)
+                            approx = cv2.approxPolyDP(largest_cnt, 0.003 * peri, True)
+                            hull_indices = cv2.convexHull(approx, returnPoints=False) if len(approx) >= 6 else None
+
+                            M_cnt = cv2.moments(largest_cnt)
+                            prelim_angle_deg = 0.0
+                            if M_cnt["m00"] > 0:
+                                mu20, mu02, mu11 = M_cnt["mu20"], M_cnt["mu02"], M_cnt["mu11"]
+                                denom = mu02 - mu20
+                                if abs(denom) > 1e-3 or abs(mu11) > 1e-3:
+                                    raw_angle = 0.5 * math.degrees(math.atan2(-2.0 * mu11, denom))
+                                    if abs(raw_angle) <= 60.0:
+                                        prelim_angle_deg = raw_angle
+
+                            rad_p = math.radians(prelim_angle_deg)
+                            u_distal_x = math.sin(rad_p)
+                            u_distal_y = -math.cos(rad_p)
+                            u_lateral_x = math.cos(rad_p)
+                            u_lateral_y = math.sin(rad_p)
+
+                            finger_valleys = []
+                            thumb_candidates = []
+
+                            if hull_indices is not None and len(hull_indices) >= 4:
+                                try:
+                                    defects = cv2.convexityDefects(approx, hull_indices)
+                                    if defects is not None:
+                                        for s, e, f, d in defects.reshape(-1, 4):
+                                            depth = d / 256.0
+                                            if depth < max(8.0, prad * 0.12):
+                                                continue
+                                            far_pt = approx[f][0]
+                                            fx, fy = float(far_pt[0]), float(far_pt[1])
+                                            dist = math.hypot(fx - pcx, fy - pcy)
+                                            if not (0.45 * prad <= dist <= 2.4 * prad):
+                                                continue
+                                            vx = fx - pcx
+                                            vy = fy - pcy
+                                            distal_proj = vx * u_distal_x + vy * u_distal_y
+                                            lateral_proj = vx * u_lateral_x + vy * u_lateral_y
+                                            if distal_proj > 0.35 * prad:
+                                                finger_valleys.append((fx, fy, depth))
+                                            if (-0.40 * prad <= distal_proj <= 1.15 * prad) and (abs(lateral_proj) > 0.35 * prad):
+                                                thumb_candidates.append((fx, fy, depth))
+                                except Exception:
+                                    pass
+
+                            crease_peak = 0.0
+                            if prad >= 10:
+                                y1_roi, y2_roi = max(0, pcy - prad), min(h, pcy + prad)
+                                x1_roi, x2_roi = max(0, pcx - prad), min(w, pcx + prad)
+                                palm_roi = gray[y1_roi:y2_roi, x1_roi:x2_roi]
+                                if palm_roi.size > 0:
+                                    bh_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+                                    bh = cv2.morphologyEx(palm_roi, cv2.MORPH_BLACKHAT, bh_k)
+                                    crease_peak = float(np.max(bh))
+
+                            is_face_hairline = False
+                            if len(finger_valleys) == 2 and len(thumb_candidates) <= 2:
+                                p1, p2 = finger_valleys[0], finger_valleys[1]
+                                if (p1[0] < pcx < p2[0]) or (p2[0] < pcx < p1[0]):
+                                    y_diff = abs(p1[1] - p2[1])
+                                    x_sym = abs(abs(p1[0] - pcx) - abs(p2[0] - pcx))
+                                    if y_diff < 25.0 and x_sym < 45.0:
+                                        is_face_hairline = True
+
+                            has_anatomy = (len(finger_valleys) >= 1 or len(thumb_candidates) >= 1) and not is_face_hairline
+                            is_macro = (area_ratio >= 0.70 and crease_peak >= 6.0)
+
+                            if has_anatomy or is_macro:
+                                hand_detected = True
+                            else:
+                                issues.append("Face or non-hand detected. Please place your open palm flat in front of the camera.")
+                                guidance.append("Hold your open hand flat facing the camera with fingers pointing up. Keep your face out of the hand guide.")
 
                 if hand_detected:
                     # Check boundary occlusion / clipping
@@ -245,12 +342,31 @@ def validate_palm_image(image_bytes: bytes) -> Tuple[bool, ImageQualityMetrics, 
                             if 70 <= angle <= 110:
                                 hand_orientation = "tilted_horizontal"
                                 guidance.append("Rotate your hand upright so fingers point toward the top of the frame.")
-                            elif (pcy < box_cy - ch * 0.03) and (cy < box_cy):
-                                hand_orientation = "inverted"
-                                issues.append("Hand appears inverted or upside-down.")
-                                guidance.append("Orient your hand with fingers pointing upwards and wrist toward the bottom.")
                             else:
-                                hand_orientation = "upright"
+                                # Determine upright vs inverted using finger cleft (convexity defect) distribution
+                                is_inverted = False
+                                hull_idx = cv2.convexHull(largest_cnt, returnPoints=False)
+                                if hull_idx is not None and len(hull_idx) > 3:
+                                    defects = cv2.convexityDefects(largest_cnt, hull_idx)
+                                    if defects is not None:
+                                        valleys_above = 0
+                                        valleys_below = 0
+                                        for s, e, f, d in defects.reshape(-1, 4):
+                                            if d > prad * 100:
+                                                vy = largest_cnt[f][0][1]
+                                                if vy < pcy:
+                                                    valleys_above += 1
+                                                elif vy > pcy:
+                                                    valleys_below += 1
+                                        if valleys_below >= 2 and valleys_below > valleys_above:
+                                            is_inverted = True
+
+                                if is_inverted:
+                                    hand_orientation = "inverted"
+                                    issues.append("Hand appears inverted or upside-down.")
+                                    guidance.append("Orient your hand with fingers pointing upwards and wrist toward the bottom.")
+                                else:
+                                    hand_orientation = "upright"
                         else:
                             hand_orientation = "upright"
 

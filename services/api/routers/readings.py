@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from fastapi import APIRouter, HTTPException, Header, status, Depends
 from ..schemas.readings import (
     PalmReadingReport,
@@ -42,6 +42,9 @@ router = APIRouter(prefix="/readings", tags=["Readings Generation & Reports"])
 # In-memory store for readings (indexed by reading_id and user_id)
 # Schema: {reading_id: {"user_id": str, "data": PalmReadingReport}}
 READINGS_STORE = {}
+
+# In-memory consultation usage store tracking questions asked per reading/user
+CONSULTATION_USAGE_STORE: Dict[str, int] = {}
 
 @router.post("/generate", response_model=PalmReadingReport)
 async def generate_reading_endpoint(
@@ -263,7 +266,34 @@ async def consult_reading_endpoint(
             if cached and isinstance(cached.get("data"), PalmReadingReport):
                 request.report_context = cached["data"].model_dump()
 
-    return await answer_consultation_question(request)
+    # Enforce tier-based consultation quota per reading
+    tier = "free"
+    try:
+        from .account import USER_PROFILES
+        if str(user_id) in USER_PROFILES:
+            tier = USER_PROFILES[str(user_id)].subscription_tier or "free"
+    except Exception:
+        pass
+
+    max_consults = 1  # Free tier default
+    if tier == "membership":
+        max_consults = 9999
+    elif tier == "dual_hand":
+        max_consults = 10
+    elif tier == "premium_report":
+        max_consults = 5
+
+    usage_key = f"{user_id}:{request.reading_id or 'default'}"
+    current_used = CONSULTATION_USAGE_STORE.get(usage_key, 0)
+    if current_used >= max_consults:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Consultation quota exceeded for this reading ({current_used}/{max_consults} inquiries used). Please upgrade to Deep-Dive or Seeker Club for additional questions."
+        )
+
+    response = await answer_consultation_question(request)
+    CONSULTATION_USAGE_STORE[usage_key] = current_used + 1
+    return response
 
 @router.post("/{reading_id}/ask", response_model=PalmConsultationResponse)
 async def ask_specific_reading_endpoint(

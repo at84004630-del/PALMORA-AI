@@ -414,6 +414,3 @@ def test_elemental_constitution_extraction(synthetic_palm_image_bytes):
     assert len(features.elemental_constitution.archetypal_traits) >= 3
     assert len(features.elemental_constitution.balancing_lifestyle_practices) >= 2
     assert features.elemental_constitution.palm_aspect_ratio > 0.0
-
-
-

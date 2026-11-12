@@ -43,6 +43,16 @@ class PalmReadingReport(BaseModel):
     language: Optional[str] = Field(default="en", description="Report language code (e.g. 'en', 'hi', 'es', 'fr', 'de', 'ja', 'zh', 'ar')")
     features: Optional[PalmFeatures] = Field(default=None, description="Physical detected palm features associated with reading")
     roi_box: Optional[List[float]] = Field(default=None, description="Segmented palmar bounding box [ymin, xmin, ymax, xmax]")
+    confidence_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Overall confidence score of crease and mount detection [0.0 - 1.0]")
+    primary_tradition: Optional[str] = Field(default="Synthesis", description="Primary philosophical palmistry tradition")
+    tradition_weighting: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Source tradition balance when primary_tradition is Synthesis (e.g. western_ratio, samudrika_ratio, shouxiang_ratio)"
+    )
+    confidence_advisory: Optional[str] = Field(
+        default=None,
+        description="Quality advisory notification if confidence_score is below threshold (under 0.70)"
+    )
 
 class GenerateReadingRequest(BaseModel):
     analysis_id: Optional[str] = None

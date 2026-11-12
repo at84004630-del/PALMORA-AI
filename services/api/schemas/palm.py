@@ -35,6 +35,7 @@ class CreaseFeature(BaseModel):
     status: FeatureStatus = Field(..., description="Detection certainty: detected, uncertain, not_detected, or unsupported")
     path: List[Point2D] = Field(default_factory=list, description="Normalized coordinates [0.0 - 1.0] along centerline")
     pixel_path: List[Point2D] = Field(default_factory=list, description="Pixel coordinates [x, y] in original image space")
+    bezier_control_points: Optional[List[Point2D]] = Field(default=None, description="Parametric cubic Bézier control points [P0, P1, P2, P3] in normalized coordinates")
     measurements: Dict[str, Any] = Field(default_factory=dict, description="Observable physical metrics extracted from the image")
     detector_version: str = Field(default="multiscale_crease_extractor_v2.0", description="Algorithm version that extracted the crease")
     quality_score: Optional[float] = Field(None, description="Visual prominence/salience score before thresholding")
@@ -48,6 +49,9 @@ class MountContour(BaseModel):
     relative_elevation: float = Field(default=0.5, description="Normalized relative elevation/thickness [0.0 - 1.0] from photometric shading")
     prominence: str = Field(default="moderate", description="Prominence classification: flat, moderate, developed, or prominent")
     symbolic_significance: Optional[str] = Field(None, description="Traditional cultural/archetypal association")
+    center: Optional[Point2D] = Field(default=None, description="Normalized [0.0 - 1.0] anatomical centroid coordinate")
+    radius: Optional[float] = Field(default=None, description="Normalized radius of the fleshy pad zone")
+    confidence: float = Field(default=0.88, description="Measurement certainty score [0.0 - 1.0]")
 
 class MountTopography(BaseModel):
     jupiter: MountContour = Field(default_factory=lambda: MountContour(name="Mount of Jupiter", relative_elevation=0.52, prominence="moderate", symbolic_significance="Leadership, ambition, and social expansion"))
@@ -79,6 +83,10 @@ class PalmFeatures(BaseModel):
     hand_side: Optional[str] = Field("unknown", description="Hand side: left, right, or unknown")
     mount_topography: Optional[MountTopography] = Field(default=None, description="Photometric elevation and fleshiness of major palmar mounts")
     elemental_constitution: Optional[ElementalConstitution] = Field(default=None, description="Elemental hand typing and constitution")
+    landmarks: Optional[List[Point2D]] = Field(default=None, description="21 3D hand mesh landmarks")
+    landmarks_confidence: Optional[float] = Field(default=None, description="Hand landmarking detection confidence")
+    hand_side_confidence: Optional[float] = Field(default=None, description="Handedness estimation confidence")
+    overall_confidence: Optional[float] = Field(default=None, description="Overall feature extraction confidence")
 
 class PalmAnalysisResult(BaseModel):
     analysis_id: str
@@ -90,6 +98,7 @@ class PalmAnalysisResult(BaseModel):
     detector_model: str = "multiscale_crease_extractor_v2.0"
     ensemble_timing_ms: Optional[float] = Field(None, description="Test-time ensembling execution time in milliseconds")
     ensemble_runs_count: Optional[int] = Field(5, description="Number of ensembled perturbation passes")
+    isolated_bokeh_image_base64: Optional[str] = Field(None, description="Portrait-isolated palm composited over high-radius optical background bokeh")
     disclaimer: str = (
         "Palmora AI provides cultural interpretations and traditional symbolic reflections "
         "for self-discovery and entertainment. It does not provide medical, scientific, "

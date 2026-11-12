@@ -33,6 +33,7 @@ import {
   analyzeTemporalCreaseDrift,
   TemporalDriftReport,
   PalmFeatures,
+  TelemetryData,
 } from '../../lib/api';
 import {
   getLocalReadings,
@@ -46,23 +47,6 @@ import TemporalDriftDiffView from '../../components/TemporalDriftDiffView';
 import { RelationalSynastryView } from '../../components/RelationalSynastryView';
 import { QuarterlyCreaseJournal } from '../../components/QuarterlyCreaseJournal';
 
-interface TelemetryData {
-  telemetry_summary: {
-    total_events_logged: number;
-    date_range: string;
-    active_referral_campaigns: number;
-  };
-  raw_counts: Record<string, number>;
-  conversion_funnel: {
-    visitor_to_scan_started: { rate_pct: number; numerator: number; denominator: number };
-    scan_started_to_completed: { rate_pct: number; numerator: number; denominator: number };
-    scan_completed_to_reading: { rate_pct: number; numerator: number; denominator: number };
-    reading_to_share_card_created: { rate_pct: number; numerator: number; denominator: number };
-    pricing_to_purchase_verified: { rate_pct: number; numerator: number; denominator: number };
-    referral_visit_to_completed_reading: { rate_pct: number; numerator: number; denominator: number };
-  };
-  referrals: Record<string, { visits: number; completions: number; conversion_rate_pct: number }>;
-}
 
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'archive' | 'temporal' | 'synastry' | 'journal' | 'metrics' | 'preferences'>('archive');
@@ -986,107 +970,115 @@ export default function DashboardPage() {
             </button>
           </div>
 
-          {telemetry ? (
-            <div className="flex flex-col gap-6">
-              {/* Conversion Funnel Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Visitor → Scan Started</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.conversion_funnel.visitor_to_scan_started.rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      ({telemetry.conversion_funnel.visitor_to_scan_started.numerator} /{' '}
-                      {telemetry.conversion_funnel.visitor_to_scan_started.denominator})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Landing page to camera initiation</span>
-                </div>
+          {telemetry ? (() => {
+            const getMetric = (canonicalKey: string, legacyKey: string) => {
+              const f = telemetry.conversion_funnel as any;
+              if (!f) return { rate_pct: 0, numerator: 0, denominator: 0 };
+              return f[canonicalKey] || f[legacyKey] || { rate_pct: 0, numerator: 0, denominator: 0 };
+            };
+            const mVisitor = getMetric('visitor_to_scan_started', 'visitor_to_scan');
+            const mScanComp = getMetric('scan_started_to_completed', 'scan_completion');
+            const mShareCard = getMetric('reading_to_share_card_created', 'share_card_creation');
+            const mPaid = getMetric('pricing_to_purchase_verified', 'paid_checkout_conversion');
+            const mReferral = getMetric('referral_visit_to_completed_reading', 'referral_to_completed_reading');
 
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Scan Started → Completed</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.conversion_funnel.scan_started_to_completed.rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      ({telemetry.conversion_funnel.scan_started_to_completed.numerator} /{' '}
-                      {telemetry.conversion_funnel.scan_started_to_completed.denominator})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Passing CV quality validation</span>
-                </div>
-
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Reading → Story Card Created</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.conversion_funnel.reading_to_share_card_created.rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      ({telemetry.conversion_funnel.reading_to_share_card_created.numerator} /{' '}
-                      {telemetry.conversion_funnel.reading_to_share_card_created.denominator})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Viral sharing adoption rate</span>
-                </div>
-
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Pricing → Paid Conversion</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.conversion_funnel.pricing_to_purchase_verified.rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      ({telemetry.conversion_funnel.pricing_to_purchase_verified.numerator} /{' '}
-                      {telemetry.conversion_funnel.pricing_to_purchase_verified.denominator})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Checkout disabled until production gateway live</span>
-                </div>
-
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Referral → Completed Reading</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.conversion_funnel.referral_visit_to_completed_reading.rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-gray-400">
-                      ({telemetry.conversion_funnel.referral_visit_to_completed_reading.numerator} /{' '}
-                      {telemetry.conversion_funnel.referral_visit_to_completed_reading.denominator})
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Invited friends completing a reading</span>
-                </div>
-
-                <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
-                  <span className="text-xs text-gray-400">Total Telemetry Events</span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-2xl font-bold text-white">
-                      {telemetry.telemetry_summary.total_events_logged}
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-gray-400">Zero sensitive biometrics logged</span>
-                </div>
-              </div>
-
-              {/* Raw Event Counts Table */}
-              <div className="glass-card p-6 rounded-2xl border border-gray-800 flex flex-col gap-3">
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider text-[#C8AA6E]">
-                  Raw Event Distribution
-                </h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {Object.entries(telemetry.raw_counts).map(([ev, count]) => (
-                    <div key={ev} className="p-3 rounded-xl bg-gray-900/50 border border-gray-800 flex justify-between items-center">
-                      <span className="text-xs text-gray-300 font-mono">{ev}</span>
-                      <span className="text-xs font-bold text-[#C8AA6E]">{count}</span>
+            return (
+              <div className="flex flex-col gap-6">
+                {/* Conversion Funnel Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Visitor → Scan Started</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {mVisitor.rate_pct.toFixed(1)}%
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({mVisitor.numerator} / {mVisitor.denominator})
+                      </span>
                     </div>
-                  ))}
+                    <span className="text-[11px] text-gray-400">Landing page to camera initiation</span>
+                  </div>
+
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Scan Started → Completed</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {mScanComp.rate_pct.toFixed(1)}%
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({mScanComp.numerator} / {mScanComp.denominator})
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Passing CV quality validation</span>
+                  </div>
+
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Reading → Story Card Created</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {mShareCard.rate_pct.toFixed(1)}%
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({mShareCard.numerator} / {mShareCard.denominator})
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Viral sharing adoption rate</span>
+                  </div>
+
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Pricing → Paid Conversion</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {mPaid.rate_pct.toFixed(1)}%
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({mPaid.numerator} / {mPaid.denominator})
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Checkout disabled until production gateway live</span>
+                  </div>
+
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Referral → Completed Reading</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {mReferral.rate_pct.toFixed(1)}%
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({mReferral.numerator} / {mReferral.denominator})
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Invited friends completing a reading</span>
+                  </div>
+
+                  <div className="glass-card p-5 rounded-2xl border border-gray-800 flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Total Telemetry Events</span>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-bold text-white">
+                        {telemetry.telemetry_summary?.total_events_logged ?? 0}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Zero sensitive biometrics logged</span>
+                  </div>
+                </div>
+
+                {/* Raw Event Counts Table */}
+                <div className="glass-card p-6 rounded-2xl border border-gray-800 flex flex-col gap-3">
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider text-[#C8AA6E]">
+                    Raw Event Distribution
+                  </h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {Object.entries(telemetry.raw_counts || {}).map(([ev, count]) => (
+                      <div key={ev} className="p-3 rounded-xl bg-gray-900/50 border border-gray-800 flex justify-between items-center">
+                        <span className="text-xs text-gray-300 font-mono">{ev}</span>
+                        <span className="text-xs font-bold text-[#C8AA6E]">{count}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : (
+            );
+          })() : (
             <div className="glass-card p-10 rounded-2xl border border-gray-800 text-center text-xs text-gray-400">
               Loading real-time product telemetry...
             </div>

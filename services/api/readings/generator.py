@@ -722,7 +722,7 @@ def _check_head_life_origin(head_feat: CreaseFeature, life_feat: CreaseFeature) 
     Returns: (origin_status: 'joined' | 'separated' | 'ambiguous' | 'indeterminate', commentary: str)
     """
     if head_feat.status != "detected" or life_feat.status != "detected":
-        return "indeterminate", "Origin relationship could not be determined due to unsegmented crease margins."
+        return "indeterminate", ""
 
     # Prefer precomputed origin status from CV measurements
     meas_status = (head_feat.measurements or {}).get("origin_status")
@@ -746,12 +746,12 @@ def _check_head_life_origin(head_feat: CreaseFeature, life_feat: CreaseFeature) 
                 "traditionally indicating an adaptable blend of measured family mindfulness and independent initiative."
             )
         elif meas_status == "indeterminate":
-            return "indeterminate", "Origin relationship could not be determined due to unsegmented crease margins."
+            return "indeterminate", ""
 
     h_path = head_feat.path or []
     l_path = life_feat.path or []
     if not h_path or not l_path:
-        return "indeterminate", "Origin coordinates unavailable."
+        return "indeterminate", ""
 
     # Compare starting coordinates with deadband fallback
     h_start = h_path[0]
@@ -963,11 +963,11 @@ def _generate_combinatorial_synthesis(
     else:
         intellectual_tone = "mental adaptability and an openness to shifting perspectives"
 
+    origin_clause = f" {origin_commentary.strip()}" if origin_commentary and origin_commentary.strip() else ""
     p1 = (
         f"{hand_context} Your palm reveals a distinctive dialogue between emotional expression and intellectual strategy. "
         f"With your Heart Line exhibiting {emotional_tone} and your Head Line characterized by {intellectual_tone}, "
-        f"your natural instinct is to navigate life's opportunities through a tailored synthesis of feeling and deliberation. "
-        f"{origin_commentary}"
+        f"your natural instinct is to navigate life's opportunities through a tailored synthesis of feeling and deliberation.{origin_clause}"
     )
 
     # 3. Vitality & Pacing paragraph (Life line & Fate line)
@@ -1152,6 +1152,8 @@ async def generate_palm_reading(
     career_symbolism = head_rec.description
     personality_symbolism = life_rec.description
 
+    llm_result: Optional[Dict[str, Any]] = None
+
     # Attempt LLM enhancement if configured, passing calibrated measurements and archetypes
     if any(feat.status == "detected" for feat in [features.heart_line, features.head_line, features.life_line]):
         llm_prompt = f"""
@@ -1184,6 +1186,14 @@ async def generate_palm_reading(
         Return JSON with this exact structure:
         {{
           "reading_title": "string (personalized poetic title reflecting these exact features, e.g. '{reading_title}')",
+          "primary_tradition": "Synthesis",
+          "tradition_weighting": {{
+            "western_ratio": 0.45,
+            "samudrika_ratio": 0.35,
+            "shouxiang_ratio": 0.20
+          }},
+          "confidence_score": 0.85,
+          "confidence_advisory": "string or null (append advisory if confidence_score < 0.70 to retake under balanced lighting)",
           "love_interpretation": "string (2-3 paragraphs expanding on the heart line cultural symbolism and reflective communication)",
           "career_interpretation": "string (2-3 paragraphs expanding on the head line intellectual style and creative problem solving)",
           "personality_interpretation": "string (2-3 paragraphs expanding on vitality pacing and personal equilibrium)",
@@ -1202,6 +1212,51 @@ async def generate_palm_reading(
                 personality_symbolism = llm_result.get("personality_interpretation", personality_symbolism)
             synthesis_text = llm_result.get("overall_synthesis", synthesis_text)
             generation_method = "llm_augmented"
+
+    # Calculate overall confidence score across major features
+    conf_scores = []
+    for l_feat in [features.heart_line, features.head_line, features.life_line]:
+        if l_feat and l_feat.status == "detected":
+            if l_feat.confidence is not None:
+                conf_scores.append(float(l_feat.confidence))
+            elif l_feat.measurements and "vote_share" in l_feat.measurements:
+                conf_scores.append(float(l_feat.measurements["vote_share"]))
+            else:
+                conf_scores.append(0.85)
+        else:
+            conf_scores.append(0.35)
+
+    calculated_conf = round(sum(conf_scores) / len(conf_scores), 2) if conf_scores else 0.50
+    final_confidence_score = calculated_conf
+    final_tradition = "Synthesis"
+    final_tradition_weighting = {
+        "western_ratio": 0.45,
+        "samudrika_ratio": 0.35,
+        "shouxiang_ratio": 0.20
+    }
+    final_confidence_advisory = None
+    if final_confidence_score < 0.70:
+        final_confidence_advisory = (
+            "Scan clarity advisory: Overall confidence score is below 0.70 due to subtle crease contrast "
+            "or low ambient lighting. Please consider retaking the scan under balanced, glare-free lighting to resolve "
+            "faint creases before relying on this reading."
+        )
+
+    if llm_result:
+        if "confidence_score" in llm_result and isinstance(llm_result["confidence_score"], (int, float)):
+            final_confidence_score = float(llm_result["confidence_score"])
+        if "primary_tradition" in llm_result and isinstance(llm_result["primary_tradition"], str):
+            final_tradition = llm_result["primary_tradition"]
+        if "tradition_weighting" in llm_result and isinstance(llm_result["tradition_weighting"], dict):
+            final_tradition_weighting = llm_result["tradition_weighting"]
+        if "confidence_advisory" in llm_result and llm_result["confidence_advisory"]:
+            final_confidence_advisory = str(llm_result["confidence_advisory"])
+        elif final_confidence_score < 0.70 and not final_confidence_advisory:
+            final_confidence_advisory = (
+                "Scan clarity advisory: Overall confidence score is below 0.70 due to subtle crease contrast "
+                "or low ambient lighting. Please consider retaking the scan under balanced, glare-free lighting to resolve "
+                "faint creases before relying on this reading."
+            )
 
     report = PalmReadingReport(
         id=report_id,
@@ -1254,7 +1309,11 @@ async def generate_palm_reading(
         is_free_tier=(tier == "free"),
         generation_method=generation_method,
         language="en",
-        features=features
+        features=features,
+        confidence_score=final_confidence_score,
+        primary_tradition=final_tradition,
+        tradition_weighting=final_tradition_weighting,
+        confidence_advisory=final_confidence_advisory
     )
 
     if language and language.strip().lower() not in ["en", "english"]:

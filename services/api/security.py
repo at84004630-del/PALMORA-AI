@@ -2,6 +2,7 @@ import hmac
 import hashlib
 import secrets
 import time
+import uuid
 from typing import Optional, Tuple, Dict, Any, Set
 from fastapi import Header, HTTPException, status
 from .config import settings
@@ -40,9 +41,16 @@ def create_guest_token(
     """
     Generates a cryptographically random, timestamped, server-verifiable guest session token.
     Format: gst.<guest_id>.<expires_at>.<signature>
+    Uses standard RFC 4122 UUID v4 so database and auth layers accept identity without type mismatches.
     """
     if not guest_id:
-        guest_id = f"guest_{secrets.token_hex(16)}"
+        guest_id = str(uuid.uuid4())
+    else:
+        # If legacy non-UUID string was passed, convert deterministically to standard RFC 4122 UUID
+        try:
+            uuid.UUID(guest_id)
+        except (ValueError, AttributeError):
+            guest_id = str(uuid.uuid5(uuid.NAMESPACE_OID, str(guest_id)))
     expires_at = int(time.time()) + ttl_seconds
     payload = f"guest:{guest_id}:{expires_at}"
     sig = hmac.new(
@@ -121,7 +129,14 @@ def verify_token_with_reason(token: str) -> Tuple[Optional[Dict[str, Any]], Opti
     current_time = int(time.time())
 
     if prefix == "gst":
-        if not entity_id.startswith("guest_"):
+        is_valid_uuid = False
+        try:
+            uuid.UUID(entity_id)
+            is_valid_uuid = True
+        except (ValueError, AttributeError):
+            pass
+
+        if not (entity_id.startswith("guest_") or is_valid_uuid):
             return None, "MALFORMED"
 
         if len(parts) == 4:
@@ -141,7 +156,10 @@ def verify_token_with_reason(token: str) -> Tuple[Optional[Dict[str, Any]], Opti
             ).hexdigest()[:32]
 
             if hmac.compare_digest(sig, expected_sig):
-                return {"user_id": entity_id, "is_guest": True, "expires_at": expires_at}, None
+                resolved_user_id = entity_id
+                if not is_valid_uuid:
+                    resolved_user_id = str(uuid.uuid5(uuid.NAMESPACE_OID, entity_id))
+                return {"user_id": resolved_user_id, "raw_guest_id": entity_id, "is_guest": True, "expires_at": expires_at}, None
             return None, "INVALID_SIGNATURE"
 
         # Legacy 3-part guest token (without expiry) is rejected for security

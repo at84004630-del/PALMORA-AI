@@ -37,6 +37,7 @@ interface PdfExportModalProps {
   onClose: () => void;
   consultations?: PalmConsultationResponse[];
   activeLanguage?: SupportedLanguage;
+  onUnlockClick?: () => void;
 }
 
 export default function PdfExportModal({
@@ -47,6 +48,7 @@ export default function PdfExportModal({
   onClose,
   consultations = [],
   activeLanguage,
+  onUnlockClick,
 }: PdfExportModalProps) {
   const [theme, setTheme] = useState<'midnight' | 'parchment'>('midnight');
   const [includeConsultations, setIncludeConsultations] = useState<boolean>(consultations.length > 0);
@@ -68,6 +70,7 @@ export default function PdfExportModal({
             consultations,
             activeLanguage,
             features,
+            isUnlocked,
           })
         : await generatePalmReadingPdf(report, {
             theme,
@@ -75,6 +78,7 @@ export default function PdfExportModal({
             consultations,
             activeLanguage,
             features,
+            isUnlocked,
           });
 
       downloadPdfBlob(blob, filename);
@@ -96,6 +100,24 @@ export default function PdfExportModal({
   };
 
   const handleOpenInNewTab = async () => {
+    // Open blank window synchronously during user click to bypass iOS Safari & Chrome popup blockers
+    const targetWin = typeof window !== 'undefined' ? window.open('about:blank', '_blank') : null;
+    if (targetWin) {
+      try {
+        targetWin.document.write(`
+          <!DOCTYPE html>
+          <html>
+          <head><title>Palmora AI Dossier</title></head>
+          <body style="margin:0;background:#0B0E1B;color:#C8AA6E;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+            <div style="width:36px;height:36px;border:3px solid #C8AA6E;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:16px;"></div>
+            <p style="font-size:14px;color:#94a3b8;letter-spacing:0.05em;">Assembling high-resolution archival dossier...</p>
+            <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+          </body>
+          </html>
+        `);
+      } catch (_) {}
+    }
+
     setGenerating(true);
     try {
       const { url } = dualReport
@@ -105,6 +127,7 @@ export default function PdfExportModal({
             consultations,
             activeLanguage,
             features,
+            isUnlocked,
           })
         : await generatePalmReadingPdf(report, {
             theme,
@@ -112,11 +135,19 @@ export default function PdfExportModal({
             consultations,
             activeLanguage,
             features,
+            isUnlocked,
           });
-      window.open(url, '_blank');
+      if (targetWin && !targetWin.closed) {
+        targetWin.location.href = url;
+      } else {
+        window.open(url, '_blank');
+      }
       trackAnalyticsEvent('pdf_preview_opened', { reading_id: dualReport?.id || report.id });
     } catch (err) {
       console.error('Failed to open PDF:', err);
+      if (targetWin && !targetWin.closed) {
+        targetWin.close();
+      }
     } finally {
       setGenerating(false);
     }
@@ -155,6 +186,7 @@ export default function PdfExportModal({
           </div>
           <button
             onClick={onClose}
+            aria-label="Close PDF export modal"
             className="text-gray-400 hover:text-white p-2 rounded-xl hover:bg-gray-800/60 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -256,13 +288,27 @@ export default function PdfExportModal({
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>Deep-Dive 4K Vector Folio Available</span>
                 </div>
-                <Link
-                  href="/pricing?product=premium_report"
-                  className="text-[11px] font-bold text-[#C8AA6E] hover:underline flex items-center gap-1"
-                >
-                  <span>Unlock ($4.99 / ₹399)</span>
-                  <ArrowRight className="w-3 h-3 text-[#C8AA6E]" />
-                </Link>
+                {onUnlockClick ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onUnlockClick();
+                    }}
+                    className="text-[11px] font-bold text-[#C8AA6E] hover:underline flex items-center gap-1"
+                  >
+                    <span>Unlock ($4.99 / ₹399)</span>
+                    <ArrowRight className="w-3 h-3 text-[#C8AA6E]" />
+                  </button>
+                ) : (
+                  <Link
+                    href="/pricing?product=premium_report"
+                    className="text-[11px] font-bold text-[#C8AA6E] hover:underline flex items-center gap-1"
+                  >
+                    <span>Unlock ($4.99 / ₹399)</span>
+                    <ArrowRight className="w-3 h-3 text-[#C8AA6E]" />
+                  </Link>
+                )}
               </div>
               <p className="text-[11px] text-gray-300 leading-relaxed">
                 Exporting your Standard Palmora Reading Report. Upgrade to include calibrated 4K vector crease overlays, mount contours, and consultation reflections.

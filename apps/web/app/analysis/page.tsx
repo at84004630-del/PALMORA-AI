@@ -20,6 +20,7 @@ import {
   PalmAnalysisResult,
   generateReading,
   PalmReadingReport,
+  trackAnalyticsEvent,
 } from '../../lib/api';
 import {
   getCurrentAnalysis,
@@ -170,6 +171,8 @@ export default function AnalysisPage() {
         roi_box: analysis.palm_roi_box || report.roi_box,
       });
 
+      trackAnalyticsEvent('reading_generated', { reading_id: report.id });
+
       // Transition to reading view
       router.push(`/reading?id=${report.id}`);
     } catch (err: any) {
@@ -274,27 +277,104 @@ export default function AnalysisPage() {
               <span className="text-xs uppercase font-bold text-gold-gradient">Vision Metadata</span>
               <span className="text-[11px] text-gray-400 font-mono">v{analysis.analysis_version}</span>
             </div>
-            <div className="flex flex-col gap-2 text-xs text-gray-300">
-              <div className="flex justify-between">
+            <div className="flex flex-col gap-2.5 text-xs text-gray-300">
+              <div className="flex justify-between items-center">
                 <span className="text-gray-400">Hand Identified:</span>
-                <span className="font-medium capitalize text-white">{analysis.detected_hand_side} Hand</span>
+                <span className="font-medium capitalize text-white flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                  {analysis.detected_hand_side} Hand
+                  {analysis.features.hand_side_confidence && (
+                    <span className="text-[10px] text-gray-400 font-mono">
+                      ({Math.round(analysis.features.hand_side_confidence * 100)}%)
+                    </span>
+                  )}
+                </span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between items-center">
                 <span className="text-gray-400">Detector Model:</span>
                 <span className="font-mono text-[11px] text-gray-300">{analysis.detector_model}</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Heart Line Status:</span>
-                <span className="text-emerald-400 font-medium capitalize">{analysis.features.heart_line.status}</span>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Heart Line:</span>
+                <span className="text-emerald-400 font-medium flex items-center gap-1.5">
+                  <span className="capitalize">{analysis.features.heart_line.status}</span>
+                  {analysis.features.heart_line.confidence && (
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono">
+                      {Math.round(analysis.features.heart_line.confidence * 100)}%
+                    </span>
+                  )}
+                </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Head Line Status:</span>
-                <span className="text-emerald-400 font-medium capitalize">{analysis.features.head_line.status}</span>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Head Line:</span>
+                <span className="text-emerald-400 font-medium flex items-center gap-1.5">
+                  <span className="capitalize">{analysis.features.head_line.status}</span>
+                  {analysis.features.head_line.confidence && (
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono">
+                      {Math.round(analysis.features.head_line.confidence * 100)}%
+                    </span>
+                  )}
+                </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Life Line Status:</span>
-                <span className="text-emerald-400 font-medium capitalize">{analysis.features.life_line.status}</span>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Life Line:</span>
+                <span className="text-emerald-400 font-medium flex items-center gap-1.5">
+                  <span className="capitalize">{analysis.features.life_line.status}</span>
+                  {analysis.features.life_line.confidence && (
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono">
+                      {Math.round(analysis.features.life_line.confidence * 100)}%
+                    </span>
+                  )}
+                </span>
               </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Fate / Destiny:</span>
+                <span className="text-[#C8AA6E] font-medium flex items-center gap-1.5">
+                  {analysis.features.fate_line?.status === 'detected' ? (
+                    <>
+                      <span>Detected</span>
+                      {analysis.features.fate_line.confidence && (
+                        <span className="text-[10px] bg-[#C8AA6E]/15 text-[#C8AA6E] border border-[#C8AA6E]/30 px-1.5 py-0.5 rounded font-mono">
+                          {Math.round(analysis.features.fate_line.confidence * 100)}%
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-[11px] bg-[rgba(200,170,110,0.12)] text-[#C8AA6E] border border-[rgba(200,170,110,0.25)] px-2 py-0.5 rounded-full">
+                      ✨ Self-Made / Fluid
+                    </span>
+                  )}
+                </span>
+              </div>
+              {analysis.features.overall_confidence && (
+                <div className="pt-2 border-t border-gray-800/80 flex justify-between items-center text-[11px]">
+                  <span className="text-gray-400">Biometric Reliability:</span>
+                  <span className="text-[#C8AA6E] font-mono font-semibold">
+                    {Math.round(analysis.features.overall_confidence * 100)}% Overall Confidence
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Simian Crease Special Feature Banner */}
+            {Boolean(analysis.features.head_line?.measurements?.is_simian_crease || analysis.features.heart_line?.measurements?.is_simian_crease) && (
+              <div className="p-3 rounded-xl bg-purple-950/40 border border-purple-500/40 text-purple-200 text-xs flex items-center gap-2.5">
+                <Sparkles className="w-4 h-4 text-purple-400 shrink-0" />
+                <div>
+                  <span className="font-bold text-white block">Rare Anatomical Feature: Simian Crease</span>
+                  <span className="text-[11px] text-purple-300">Complete transverse fusion of intellect and emotion lines.</span>
+                </div>
+              </div>
+            )}
+
+            {/* Value Distinction Notice */}
+            <div className="mt-3 pt-3 border-t border-gray-800 flex items-center justify-between text-[11px]">
+              <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                ✓ 3 Core Creases Free
+              </span>
+              <span className="text-[#C8AA6E] font-semibold flex items-center gap-1">
+                🔒 Mounts & Timing in Deep-Dive
+              </span>
             </div>
           </div>
 

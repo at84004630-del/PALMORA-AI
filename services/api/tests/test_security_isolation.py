@@ -14,14 +14,15 @@ async def test_guest_session_generation():
         assert res.status_code == 200
         data = res.json()
         assert "session_token" in data
-        assert data["session_token"].startswith("gst.guest_")
+        assert data["session_token"].startswith("gst.")
         # Ensure timestamped 4-segment format
         parts = data["session_token"].split(".")
         assert len(parts) == 4
         assert int(parts[2]) > 0
         assert data["is_guest"] is True
         assert "user_id" in data
-        assert data["user_id"].startswith("guest_")
+        import uuid as _uuid
+        _uuid.UUID(data["user_id"])  # Valid RFC 4122 UUID
 
 @pytest.mark.asyncio
 async def test_guest_a_cannot_list_guest_b_readings(synthetic_palm_image_bytes):

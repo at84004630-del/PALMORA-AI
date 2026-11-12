@@ -13,6 +13,7 @@
     "dev:web": "npm --workspace=@palmora/web run dev",
     "build:web": "npm --workspace=@palmora/shared-types run build && npm --workspace=@palmora/web run build",
     "test:web": "npm --workspace=@palmora/web test",
+    "test:e2e": "npm --workspace=@palmora/web run test:e2e",
     "test": "npm run test:web"
   }
 }

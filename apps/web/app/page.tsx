@@ -1,7 +1,8 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import Link from 'next/link';
+import { trackAnalyticsEvent } from '../lib/api';
 import {
   Sparkles,
   Hand,
@@ -20,6 +21,10 @@ import {
 } from 'lucide-react';
 
 export default function LandingPage() {
+  useEffect(() => {
+    trackAnalyticsEvent('landing_view');
+  }, []);
+
   const faqs = [
     {
       q: 'How does Palmora AI read my palm photograph?',

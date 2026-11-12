@@ -46,6 +46,7 @@ import {
 import { reportCameraFailure } from '../../lib/sentry';
 import { PalmFramingReticle, AlignmentStatus, GuideScale } from '../../components/PalmFramingReticle';
 import { PalmFramingGuideModal } from '../../components/PalmFramingGuideModal';
+import { onDeviceSegmenter } from '../../lib/onnxCreaseSegmenter';
 
 export default function ScanPage() {
   const router = useRouter();
@@ -66,6 +67,49 @@ export default function ScanPage() {
 
   // Mode: 'select' | 'camera' | 'preview'
   const [mode, setMode] = useState<'select' | 'camera' | 'preview'>('select');
+
+  // Pre-warm ONNX WebAssembly engine on mount for 60 FPS on-device inference
+  useEffect(() => {
+    onDeviceSegmenter.initSession().catch((err) => {
+      console.warn('Pre-warming onnxruntime session:', err);
+    });
+  }, []);
+
+  // Restore Dual-Hand Step 1 if the user refreshed or changed orientation during Step 2
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const cachedAnalysis = sessionStorage.getItem('palmora_dual_analysis_nd');
+      const cachedPreview = sessionStorage.getItem('palmora_dual_preview_nd');
+      if (cachedAnalysis) {
+        const parsed = JSON.parse(cachedAnalysis);
+        if (parsed?.analysis_id) {
+          setNonDominantAnalysis(parsed);
+          if (cachedPreview) setNonDominantPreviewUrl(cachedPreview);
+          setScanType('dual');
+          setDualStep(2);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to restore dual hand session', e);
+    }
+  }, []);
+
+  const handleResetDualScan = () => {
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.removeItem('palmora_dual_analysis_nd');
+        sessionStorage.removeItem('palmora_dual_preview_nd');
+        sessionStorage.removeItem('palmora_dual_preview_dom');
+      } catch (_) {}
+    }
+    setNonDominantAnalysis(null);
+    setNonDominantPreviewUrl(null);
+    setNonDominantFile(null);
+    setPendingDualAnalyses(null);
+    setShowDualUnlockModal(false);
+    setDualStep(1);
+  };
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
 
@@ -74,6 +118,7 @@ export default function ScanPage() {
   const [guideScale, setGuideScale] = useState<GuideScale>('normal');
   const [alignmentStatus, setAlignmentStatus] = useState<AlignmentStatus>('no_hand');
   const [alignmentMessage, setAlignmentMessage] = useState<string>('');
+  const [frameFill, setFrameFill] = useState<number>(0);
   const [autoSnapEnabled, setAutoSnapEnabled] = useState(true);
   const [autoSnapCountdown, setAutoSnapCountdown] = useState<number | null>(null);
 
@@ -81,19 +126,41 @@ export default function ScanPage() {
   const steadyCountRef = useRef<number>(0);
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const samplerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownActiveRef = useRef<boolean>(false);
+  const countdownValueRef = useRef<number | null>(null);
+  const absentFramesRef = useRef<number>(0);
+  const autoSnapEnabledRef = useRef<boolean>(autoSnapEnabled);
+  const capturePhotoRef = useRef<() => void>(() => {});
 
   // Privacy disclosure acceptance
   const [privacyConsent, setPrivacyConsent] = useState(true);
+
+  // Synchronize autoSnapEnabled ref and cancel active countdown if toggled off
+  useEffect(() => {
+    autoSnapEnabledRef.current = autoSnapEnabled;
+    if (!autoSnapEnabled && countdownActiveRef.current) {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      countdownActiveRef.current = false;
+      countdownValueRef.current = null;
+      absentFramesRef.current = 0;
+      setAutoSnapCountdown(null);
+    }
+  }, [autoSnapEnabled]);
 
   // Camera states
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [streamActive, setStreamActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isFrontCamera, setIsFrontCamera] = useState(false);
 
   // Validation & Processing states
   const [isValidating, setIsValidating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState<string>('Isolating Palmar Topography...');
   const [qualityMetrics, setQualityMetrics] = useState<ImageQualityMetrics | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -107,6 +174,9 @@ export default function ScanPage() {
       clearInterval(countdownIntervalRef.current);
       countdownIntervalRef.current = null;
     }
+    countdownActiveRef.current = false;
+    countdownValueRef.current = null;
+    absentFramesRef.current = 0;
     setAutoSnapCountdown(null);
     steadyCountRef.current = 0;
 
@@ -188,6 +258,9 @@ export default function ScanPage() {
         clearInterval(countdownIntervalRef.current);
         countdownIntervalRef.current = null;
       }
+      countdownActiveRef.current = false;
+      countdownValueRef.current = null;
+      absentFramesRef.current = 0;
       setAutoSnapCountdown(null);
       steadyCountRef.current = 0;
       return;
@@ -207,6 +280,9 @@ export default function ScanPage() {
       if (!ctx) return;
 
       try {
+        // Trigger on-device 60 FPS ONNX WebAssembly crease segmentation
+        onDeviceSegmenter.segmentFrame(video).catch(() => {});
+
         ctx.drawImage(video, 0, 0, 120, 160);
         const imgData = ctx.getImageData(0, 0, 120, 160);
         const d = imgData.data;
@@ -215,11 +291,22 @@ export default function ScanPage() {
         let skinCount = 0;
         let sumX = 0;
         let sumY = 0;
+        let glareCount = 0;
 
-        // Zone: x: 12..108 (10% to 90%), y: 16..150 (10% to 94%)
+        let coreSkin = 0;
+        let coreTotal = 0;
+        let wristSkin = 0;
+        let wristTotal = 0;
+        let cornerSkin = 0;
+        let cornerTotal = 0;
+        let fingerSkin = 0;
+        let fingerTotal = 0;
+        let darkHairTotal = 0;
+
+        // Framing envelope: x: 14..106, y: 18..148 (matches canonical hand silhouette)
         let zonePixels = 0;
-        for (let y = 16; y < 150; y += 2) {
-          for (let x = 12; x < 108; x += 2) {
+        for (let y = 18; y < 148; y += 2) {
+          for (let x = 14; x < 106; x += 2) {
             zonePixels++;
             const idx = (y * 120 + x) * 4;
             const r = d[idx];
@@ -229,11 +316,54 @@ export default function ScanPage() {
             const lum = 0.299 * r + 0.587 * g + 0.114 * b;
             totalBrightness += lum;
 
-            // Fitzpatrick-robust skin chrominance test
-            if (r > 45 && g > 30 && b > 15 && r > g && r > b && (r - g) > 8) {
-              skinCount++;
-              sumX += x;
-              sumY += y;
+            // Direct light source / specular bulb flare check (e.g. ceiling lights shining directly into camera)
+            if (lum >= 246 && (r + g + b) >= 700) {
+              glareCount++;
+            }
+
+            // Fitzpatrick I-VI inclusive skin chrominance test
+            // Uses normalized r-g space + shadow/lighting safety checks
+            const rgbSum = r + g + b;
+            let isSkin = false;
+            if (rgbSum > 60 && lum >= 28) {
+              const rn = r / rgbSum;
+              const gn = g / rgbSum;
+              // Human skin chromaticity envelope across light, medium, and deep skin tones
+              const isSkinChrominance = rn >= 0.28 && rn <= 0.68 && gn >= 0.20 && gn <= 0.44;
+              // Channel hierarchy: red dominates or equals green, and distinctly exceeds blue
+              const isSkinBalance = r >= g * 0.88 && r >= b + 2;
+
+              if (isSkinChrominance && isSkinBalance) {
+                isSkin = true;
+                skinCount++;
+                sumX += x;
+                sumY += y;
+              }
+            }
+
+            // Central Palm Core disc: x: 36..84, y: 65..115 (must contain palm disk)
+            if (x >= 36 && x <= 84 && y >= 65 && y <= 115) {
+              coreTotal++;
+              if (isSkin) coreSkin++;
+            }
+
+            // Upper Finger zone: x: 38..82, y: 18..52 (an upright open palm MUST have fingers extending here)
+            if (x >= 38 && x <= 82 && y >= 18 && y <= 52) {
+              fingerTotal++;
+              if (isSkin) fingerSkin++;
+              if (lum < 52) darkHairTotal++;
+            }
+
+            // Wrist Base anchor: x: 36..84, y: 130..148 (must enter from bottom)
+            if (x >= 36 && x <= 84 && y >= 130 && y <= 148) {
+              wristTotal++;
+              if (isSkin) wristSkin++;
+            }
+
+            // Top Outer Corners: x: 14..32 or 88..106, y: 18..45 (should be empty background around fingers)
+            if ((x <= 32 || x >= 88) && y <= 45) {
+              cornerTotal++;
+              if (isSkin) cornerSkin++;
             }
           }
         }
@@ -241,71 +371,74 @@ export default function ScanPage() {
         const avgBrightness = zonePixels > 0 ? totalBrightness / zonePixels : 120;
         const coverage = zonePixels > 0 ? skinCount / zonePixels : 0;
         const centroidX = skinCount > 0 ? sumX / skinCount / 120 : 0.5;
+        const centroidY = skinCount > 0 ? sumY / skinCount / 160 : 0.5;
+
+        const coreCoverage = coreTotal > 0 ? coreSkin / coreTotal : 0;
+        const wristCoverage = wristTotal > 0 ? wristSkin / wristTotal : 0;
+        const cornerCoverage = cornerTotal > 0 ? cornerSkin / cornerTotal : 0;
+        const fingerCoverage = fingerTotal > 0 ? fingerSkin / fingerTotal : 0;
+        const darkHairRatio = fingerTotal > 0 ? darkHairTotal / fingerTotal : 0;
 
         let newStatus: AlignmentStatus = 'no_hand';
         let newMsg = '';
 
-        if (avgBrightness < 45) {
+        const fillPercent = Math.min(100, Math.round(coverage * 100));
+        setFrameFill(fillPercent);
+
+        if (glareCount >= 18) {
+          newStatus = 'backlight_glare';
+          newMsg = '⚠️ Harsh backlight: Point camera away from ceiling lights';
+        } else if (cornerCoverage > 0.40 && avgBrightness > 195 && coreCoverage < 0.50) {
+          newStatus = 'backlight_glare';
+          newMsg = '☀️ Bright window behind you: Turn to face the light';
+        } else if (coreCoverage > 0.65 && fingerCoverage < 0.14) {
+          newStatus = 'too_far';
+          newMsg = '📐 Hold palm flat and parallel to camera';
+        } else if (avgBrightness < 45) {
           newStatus = 'too_dark';
           newMsg = 'Lighting is dim: Face towards a light source';
         } else if (avgBrightness > 235) {
           newStatus = 'too_bright';
           newMsg = 'Too much glare: Shield direct lighting';
-        } else if (coverage < 0.14) {
+        } else if (cornerCoverage > 0.45 && coreCoverage < 0.35) {
+          // Room background (e.g. wooden wardrobe, doors, walls) filling the frame without a hand
+          newStatus = 'background_interference';
+          newMsg = 'Room background detected: Place palm inside the outline';
+        } else if (coreCoverage >= 0.30 && (fingerCoverage < 0.16 || darkHairRatio > 0.28)) {
+          // User face / head framed in the webcam reticle instead of an open palm
+          newStatus = 'no_hand';
+          newMsg = '👤 Face detected: Please hold up your open palm inside the guide';
+        } else if (coreCoverage < 0.28 || coverage < 0.16) {
           newStatus = 'no_hand';
           newMsg = 'Position your open palm inside the outline';
-        } else if (coverage < 0.26) {
+        } else if (coverage < 0.28 || coreCoverage < 0.40) {
           newStatus = 'too_far';
           newMsg = 'Bring palm closer to camera';
-        } else if (coverage > 0.84) {
+        } else if (coverage > 0.88 || (coreCoverage > 0.95 && cornerCoverage > 0.42)) {
           newStatus = 'too_close';
           newMsg = 'Move hand back slightly';
-        } else if (centroidX < 0.35) {
+        } else if (centroidX < 0.33) {
           newStatus = 'shift_right';
           newMsg = 'Shift hand slightly right 👉';
-        } else if (centroidX > 0.65) {
+        } else if (centroidX > 0.67) {
           newStatus = 'shift_left';
           newMsg = 'Shift hand slightly left 👈';
+        } else if (wristCoverage < 0.12 && coverage < 0.50) {
+          newStatus = 'no_hand';
+          newMsg = 'Anchor wrist at bottom line of guide';
+        } else if (fingerCoverage < 0.16 && coverage < 0.65) {
+          newStatus = 'no_hand';
+          newMsg = 'Extend fingers toward top of guide';
         } else {
           newStatus = 'optimal';
-          newMsg = '✨ Perfect alignment! Hold steady...';
+          newMsg = '✨ Perfect alignment! Click "Snap Photo Now" below';
         }
 
         setAlignmentStatus(newStatus);
         setAlignmentMessage(newMsg);
 
-        // Auto-Snap logic
-        if (newStatus === 'optimal') {
-          steadyCountRef.current += 1;
-          // After being steady for ~1 second (5 ticks of 200ms)
-          if (steadyCountRef.current >= 5 && autoSnapEnabled) {
-            if (!countdownIntervalRef.current && autoSnapCountdown === null) {
-              let count = 3;
-              setAutoSnapCountdown(count);
-              countdownIntervalRef.current = setInterval(() => {
-                count -= 1;
-                if (count > 0) {
-                  setAutoSnapCountdown(count);
-                } else {
-                  if (countdownIntervalRef.current) {
-                    clearInterval(countdownIntervalRef.current);
-                    countdownIntervalRef.current = null;
-                  }
-                  setAutoSnapCountdown(null);
-                  capturePhotoFromCamera();
-                }
-              }, 1000);
-            }
-          }
-        } else {
-          // Hand moved or not optimal
-          steadyCountRef.current = 0;
-          if (countdownIntervalRef.current) {
-            clearInterval(countdownIntervalRef.current);
-            countdownIntervalRef.current = null;
-            setAutoSnapCountdown(null);
-          }
-        }
+        // Manual capture: User clicks "Snap Photo Now" when aligned
+        // No automatic snapping
       } catch (e) {
         // Ignore canvas read errors
       }
@@ -320,8 +453,11 @@ export default function ScanPage() {
         clearInterval(countdownIntervalRef.current);
         countdownIntervalRef.current = null;
       }
+      countdownActiveRef.current = false;
+      countdownValueRef.current = null;
+      absentFramesRef.current = 0;
     };
-  }, [mode, streamActive, autoSnapEnabled, autoSnapCountdown]);
+  }, [mode, streamActive]);
 
   const startCamera = async () => {
     setCameraError(null);
@@ -392,6 +528,11 @@ export default function ScanPage() {
 
     if (activeStream) {
       streamRef.current = activeStream;
+      const track = activeStream.getVideoTracks()[0];
+      const trackSettings = track?.getSettings?.();
+      const isFront = trackSettings?.facingMode === 'user' || (!trackSettings?.facingMode && (typeof navigator !== 'undefined' && !navigator.userAgent.includes('Mobi')));
+      setIsFrontCamera(Boolean(isFront));
+
       if (videoRef.current) {
         videoRef.current.srcObject = activeStream;
         try {
@@ -440,27 +581,105 @@ export default function ScanPage() {
     }
   };
 
-  const capturePhotoFromCamera = () => {
+  const handleCancelCountdown = () => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    countdownActiveRef.current = false;
+    countdownValueRef.current = null;
+    absentFramesRef.current = 0;
+    setAutoSnapCountdown(null);
+    steadyCountRef.current = 0;
+  };
+
+
+/**
+ * Downscales images to max 1280px on their longest dimension and compresses to JPEG (quality 0.85).
+ * If isFrontCamera is true, horizontally flips the canvas so that left and right hands match
+ * natural human hand anatomy rather than raw unmirrored sensor data.
+ */
+async function optimizeImageForUpload(
+  source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement,
+  isFrontCamera: boolean = false
+): Promise<File> {
+  const MAX_DIMENSION = 1280;
+  let srcWidth = 0;
+  let srcHeight = 0;
+
+  if ('videoWidth' in source) {
+    srcWidth = source.videoWidth || 1280;
+    srcHeight = source.videoHeight || 720;
+  } else if ('naturalWidth' in source) {
+    srcWidth = source.naturalWidth;
+    srcHeight = source.naturalHeight;
+  } else {
+    srcWidth = source.width;
+    srcHeight = source.height;
+  }
+
+  let targetWidth = srcWidth;
+  let targetHeight = srcHeight;
+  if (srcWidth > MAX_DIMENSION || srcHeight > MAX_DIMENSION) {
+    if (srcWidth > srcHeight) {
+      targetWidth = MAX_DIMENSION;
+      targetHeight = Math.round((srcHeight * MAX_DIMENSION) / srcWidth);
+    } else {
+      targetHeight = MAX_DIMENSION;
+      targetWidth = Math.round((srcWidth * MAX_DIMENSION) / srcHeight);
+    }
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not initialize 2D canvas context');
+
+  // Draw source directly without horizontal inversion to preserve true biological left/right handedness
+  ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
+
+  return new Promise<File>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return reject(new Error('Image compression failed'));
+        const optimizedFile = new File([blob], 'palm_capture.jpg', { type: 'image/jpeg' });
+        resolve(optimizedFile);
+      },
+      'image/jpeg',
+      0.85
+    );
+  });
+}
+
+  const capturePhotoFromCamera = async () => {
+
+    // Reset any active countdown timers before triggering capture
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    countdownActiveRef.current = false;
+    countdownValueRef.current = null;
+    absentFramesRef.current = 0;
+    setAutoSnapCountdown(null);
+    steadyCountRef.current = 0;
+
     if (!videoRef.current) return;
     const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const file = new File([blob], 'palm_capture.jpg', { type: 'image/jpeg' });
-        const previewUrl = URL.createObjectURL(file);
-        handleImageChosen(file, previewUrl);
-      }
-    }, 'image/jpeg', 0.92);
+    try {
+      const optimizedFile = await optimizeImageForUpload(video, isFrontCamera);
+      const previewUrl = URL.createObjectURL(optimizedFile);
+      handleImageChosen(optimizedFile, previewUrl);
+    } catch (err) {
+      console.error('Camera capture optimization failed:', err);
+    }
 
     stopCameraStream();
   };
+
+  capturePhotoRef.current = capturePhotoFromCamera;
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -468,14 +687,35 @@ export default function ScanPage() {
 
     trackAnalyticsEvent('scan_started', { source: 'file_upload' });
 
-    if (file.size > 10 * 1024 * 1024) {
-      setErrorMessage('File size exceeds 10MB. Please select a smaller photograph.');
+    if (file.size > 25 * 1024 * 1024) {
+      setErrorMessage('File size exceeds 25MB. Please select a smaller photograph.');
       trackAnalyticsEvent('upload_rejected', { reason: 'file_size_exceeded' });
       return;
     }
 
-    const previewUrl = URL.createObjectURL(file);
-    handleImageChosen(file, previewUrl);
+    // Downscale large phone photos client-side to prevent backend memory exhaustion
+    const img = new Image();
+    const tempUrl = URL.createObjectURL(file);
+    img.onload = async () => {
+      URL.revokeObjectURL(tempUrl);
+      try {
+        let finalFile = file;
+        if (img.naturalWidth > 1280 || img.naturalHeight > 1280 || file.size > 1024 * 1024) {
+          finalFile = await optimizeImageForUpload(img, false);
+        }
+        const previewUrl = URL.createObjectURL(finalFile);
+        handleImageChosen(finalFile, previewUrl);
+      } catch (err) {
+        const previewUrl = URL.createObjectURL(file);
+        handleImageChosen(file, previewUrl);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(tempUrl);
+      const previewUrl = URL.createObjectURL(file);
+      handleImageChosen(file, previewUrl);
+    };
+    img.src = tempUrl;
   };
 
   const handleImageChosen = async (file: File, previewUrl: string) => {
@@ -511,14 +751,25 @@ export default function ScanPage() {
     if (!selectedFile || !imagePreviewUrl) return;
 
     setIsAnalyzing(true);
+    setAnalysisStage('Isolating Palmar Topography...');
     setErrorMessage(null);
+
+    const timer1 = setTimeout(() => {
+      setAnalysisStage('Extracting Epidermal Crease Vectors...');
+    }, 1400);
+    const timer2 = setTimeout(() => {
+      setAnalysisStage('Calibrating 3D Mount Elevations...');
+    }, 3000);
+    const timer3 = setTimeout(() => {
+      setAnalysisStage('Finalizing Biometric Ensembling...');
+    }, 4500);
 
     try {
       const analysisResult = await analyzePalmImage(selectedFile);
 
       if (scanType === 'single') {
         saveCurrentAnalysis(analysisResult);
-        saveCurrentImagePreview(selectedFile);
+        saveCurrentImagePreview(analysisResult.isolated_bokeh_image_base64 || selectedFile);
         trackAnalyticsEvent('scan_completed', {
           analysis_id: analysisResult.analysis_id,
           hand_side: analysisResult.detected_hand_side,
@@ -531,8 +782,14 @@ export default function ScanPage() {
       // Dual-hand flow: Step 1 (Non-Dominant Palm)
       if (dualStep === 1) {
         setNonDominantAnalysis(analysisResult);
-        setNonDominantPreviewUrl(imagePreviewUrl);
+        const previewNd = analysisResult.isolated_bokeh_image_base64 || imagePreviewUrl;
+        setNonDominantPreviewUrl(previewNd);
         setNonDominantFile(selectedFile);
+        if (typeof window !== 'undefined') {
+          try {
+            sessionStorage.setItem('palmora_dual_analysis_nd', JSON.stringify(analysisResult));
+          } catch {}
+        }
         if (typeof window !== 'undefined' && imagePreviewUrl) {
           try {
             sessionStorage.setItem('palmora_dual_preview_nd', imagePreviewUrl);
@@ -617,6 +874,9 @@ export default function ScanPage() {
       setErrorMessage(err.message || 'Unable to process image. Please try another photograph.');
       trackAnalyticsEvent('scan_failed', { error: err.message, scan_type: scanType });
     } finally {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      clearTimeout(timer3);
       setIsAnalyzing(false);
       setIsComparing(false);
     }
@@ -765,6 +1025,38 @@ export default function ScanPage() {
             </span>
             <span>Comparative Synthesis</span>
           </div>
+        </div>
+      )}
+
+      {/* Dual Step 2 Active Status & Retake Option */}
+      {scanType === 'dual' && dualStep === 2 && (
+        <div className="w-full max-w-xl flex items-center justify-between bg-amber-500/10 border border-amber-500/20 px-4 py-2 rounded-xl text-xs text-amber-300 mb-6">
+          <span className="flex items-center gap-2">
+            <span className="text-emerald-400 font-bold">✓</span> Hand 1 ({nonDominantHandLabel}) preserved. Now scanning Hand 2 ({dominantHandLabel}).
+          </span>
+          <button
+            type="button"
+            onClick={handleResetDualScan}
+            className="underline hover:text-amber-200 ml-2 font-medium shrink-0"
+          >
+            Retake Hand 1
+          </button>
+        </div>
+      )}
+
+      {/* Dual Unlock Recovery Banner if modal was dismissed */}
+      {pendingDualAnalyses && !showDualUnlockModal && (
+        <div className="w-full max-w-xl mb-6 p-4 bg-purple-950/40 border border-purple-500/30 rounded-2xl flex items-center justify-between gap-3 shadow-lg">
+          <div className="text-xs text-purple-200">
+            <span className="font-bold text-white">Dual-Hand Evolution Ready:</span> Both hands captured. Unlock comparative synthesis to view report.
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowDualUnlockModal(true)}
+            className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-xl shadow-md shrink-0 transition-colors"
+          >
+            Unlock Synthesis
+          </button>
         </div>
       )}
 
@@ -1040,7 +1332,7 @@ export default function ScanPage() {
                 playsInline
                 autoPlay
                 muted
-                className="w-full h-full object-cover"
+                className={`w-full h-full object-cover ${isFrontCamera ? '-scale-x-100' : ''}`}
               />
 
               {/* Anatomical Hand Silhouette Alignment Guide & Real-Time Feedback */}
@@ -1062,8 +1354,10 @@ export default function ScanPage() {
                 status={alignmentStatus}
                 statusMessage={alignmentMessage}
                 guideScale={guideScale}
-                autoSnapCountdown={autoSnapCountdown}
+                autoSnapCountdown={null}
+                fillPercentage={frameFill}
                 onScaleChange={setGuideScale}
+                onCancelCountdown={handleCancelCountdown}
               />
             </div>
 
@@ -1080,28 +1374,7 @@ export default function ScanPage() {
                   <span>Framing Guide</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setAutoSnapEnabled((prev) => !prev)}
-                  className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all flex items-center gap-1.5 shadow-sm ${
-                    autoSnapEnabled
-                      ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60'
-                      : 'bg-gray-900/70 border-gray-800 text-gray-400 hover:text-gray-200'
-                  }`}
-                  title="Automatically snap photograph when palm is steady in optimal framing"
-                >
-                  {autoSnapEnabled ? (
-                    <>
-                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Auto-Snap: ON</span>
-                    </>
-                  ) : (
-                    <>
-                      <ZapOff className="w-3.5 h-3.5 text-gray-400" />
-                      <span>Auto-Snap: OFF</span>
-                    </>
-                  )}
-                </button>
+
 
                 <button
                   onClick={resetSelection}
@@ -1119,6 +1392,21 @@ export default function ScanPage() {
                 <Camera className="w-4 h-4" />
                 <span>Snap Photo Now</span>
               </button>
+
+              {/* Direct Alternative: Upload Photo */}
+              <label className="w-full py-2.5 px-4 rounded-xl border border-gray-800 hover:border-gray-700 bg-gray-900/40 hover:bg-gray-900/80 text-gray-400 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors">
+                <Upload className="w-3.5 h-3.5 text-[#C8AA6E]" />
+                <span>Laptop angle awkward? Upload photo from phone</span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onClick={(e) => {
+                    (e.target as HTMLInputElement).value = '';
+                  }}
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+              </label>
             </div>
           </div>
         )}
@@ -1185,7 +1473,61 @@ export default function ScanPage() {
                   </span>
                 </div>
               )}
+
+              {isAnalyzing && (
+                <div className="absolute inset-0 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center gap-3 p-6 text-center z-20 animate-in fade-in duration-200">
+                  <div className="relative flex items-center justify-center">
+                    <RefreshCw className="w-10 h-10 text-[#C8AA6E] animate-spin" />
+                    <Sparkles className="w-4 h-4 text-[#C8AA6E] absolute" />
+                  </div>
+                  <span className="text-sm text-white font-bold tracking-wide">
+                    {analysisStage}
+                  </span>
+                  <span className="text-[11px] text-[#C8AA6E]/90 font-medium">
+                    5-Pass Test-Time Ensembling in progress
+                  </span>
+                  <div className="w-48 h-1.5 bg-gray-800 rounded-full overflow-hidden mt-1">
+                    <div className="h-full bg-gradient-to-r from-[#C8AA6E] via-amber-200 to-[#C8AA6E] animate-pulse rounded-full w-full" />
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* Warning when no hand is detected in photo */}
+            {qualityMetrics && !qualityMetrics.hand_detected && (
+              <div className="w-full max-w-md p-4.5 rounded-2xl bg-amber-950/60 border border-amber-500/50 text-amber-200 text-xs flex flex-col gap-2.5 shadow-xl">
+                <div className="flex items-center gap-2 font-bold text-amber-300 text-sm">
+                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>No Open Palm Detected</span>
+                </div>
+                <p className="text-gray-300 leading-relaxed text-[11px]">
+                  The photograph appears to show room background, ceiling, or an obstructed angle rather than an open palm. Please retake the photo with your palm open flat, or upload a clear photo taken on your phone.
+                </p>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={startCamera}
+                    className="btn-gold py-2 px-3.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Retake with Camera</span>
+                  </button>
+                  <label className="py-2 px-3.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-white font-semibold text-xs cursor-pointer border border-gray-700 flex items-center gap-1.5 transition-colors">
+                    <Upload className="w-3.5 h-3.5 text-[#C8AA6E]" />
+                    <span>Upload from Phone</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      onClick={(e) => {
+                        (e.target as HTMLInputElement).value = '';
+                      }}
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
 
             {/* Validation Feedback Status */}
             {qualityMetrics && (
@@ -1291,13 +1633,14 @@ export default function ScanPage() {
               </button>
               <button
                 onClick={runAnalysisAndProceed}
-                disabled={isAnalyzing || isValidating || isComparing}
-                className="btn-gold px-8 py-3 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-2 shadow-xl disabled:opacity-50"
+                disabled={isAnalyzing || isValidating || isComparing || (qualityMetrics !== null && !qualityMetrics.hand_detected)}
+                className="btn-gold px-8 py-3 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-2 shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                title={qualityMetrics && !qualityMetrics.hand_detected ? 'Please retake with an open palm visible to proceed' : ''}
               >
                 {isAnalyzing || isComparing ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>{isComparing ? 'Synthesizing Dual-Hand Evolution...' : 'Analyzing Creases...'}</span>
+                    <span>{isComparing ? 'Synthesizing Dual-Hand Evolution...' : analysisStage}</span>
                   </>
                 ) : scanType === 'dual' ? (
                   dualStep === 1 ? (

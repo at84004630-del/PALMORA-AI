@@ -10,6 +10,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, status, Depends,
 from fastapi.concurrency import run_in_threadpool
 from ..cv.validator import validate_palm_image
 from ..cv.crease_analyzer import analyze_palm_creases
+from ..cv.bokeh_engine import generate_palm_bokeh_portrait
 from ..schemas.palm import (
     ImageQualityMetrics,
     PalmAnalysisResult,
@@ -79,32 +80,46 @@ def _run_single_ensemble_pass(args):
 
 def _run_test_time_ensemble(decoded_img: np.ndarray, quality_metrics: ImageQualityMetrics):
     """
-    Executes test-time ensembling across 5 passes (original + 4 deterministic perturbations).
-    Takes majority archetype per line and sets vote_share as confidence score.
-    Maintains latency under 6 seconds by operating on calibrated working image space.
+    Executes Dual-Scale Test-Time Ensembling:
+    1. Native High-Precision Base Extraction:
+       Runs analyze_palm_creases at full un-downscaled image resolution (capped at 1600px max_dim)
+       to capture fine sub-digital ridge details, millimeter-accurate crease paths, and exact lengths.
+    2. Concurrent Perturbation Voting:
+       Runs 4 deterministic perturbations (rotation ±2°, brightness ±5%) in parallel
+       on a fast working resolution (max_dim 800px) purely for archetype stability voting.
+    3. Merges majority vote shares into base_features confidence without degrading crease geometry.
+    Maintains latency well under 6 seconds.
     """
     t0 = time.perf_counter()
     orig_h, orig_w = decoded_img.shape[:2]
     max_dim = max(orig_h, orig_w)
-    if max_dim > 800:
-        scale = 800.0 / max_dim
-        work_w = int(orig_w * scale)
-        work_h = int(orig_h * scale)
-        work_img = cv2.resize(decoded_img, (work_w, work_h), interpolation=cv2.INTER_AREA)
+
+    # 1. Native High-Precision Base Extraction
+    if max_dim > 1600:
+        base_scale = 1600.0 / max_dim
+        base_w = int(orig_w * base_scale)
+        base_h = int(orig_h * base_scale)
+        base_img = cv2.resize(decoded_img, (base_w, base_h), interpolation=cv2.INTER_AREA)
     else:
-        work_img = decoded_img
-        scale = 1.0
+        base_img = decoded_img
+        base_scale = 1.0
 
-    tasks = [(work_img, quality_metrics, ang, br) for ang, br in ENSEMBLE_PERTURBATIONS]
-    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 4)) as pool:
-        pass_results = list(pool.map(_run_single_ensemble_pass, tasks))
+    base_features, hand_side, roi_box = analyze_palm_creases(base_img, quality_metrics)
 
-    base_features = pass_results[0]["features"]
-    hand_side = pass_results[0]["hand_side"]
-    roi_box = pass_results[0]["roi_box"]
+    # Base pass archetypes (pass 0 of ensemble)
+    h_eval = _evaluate_heart(base_features.heart_line)
+    hd_eval = _evaluate_head(base_features.head_line)
+    l_eval = _evaluate_life(base_features.life_line)
+    f_eval = _evaluate_fate(base_features.fate_line)
+    base_archetypes = {
+        "heart": h_eval.archetype_key,
+        "head": hd_eval.archetype_key,
+        "life": l_eval.archetype_key,
+        "fate": f_eval.archetype_key
+    }
 
-    # Re-project pixel coordinates back to original image space if downscaled
-    if scale < 1.0:
+    # Re-project pixel coordinates back to original image space if capped at 1600
+    if base_scale < 1.0:
         for feat in [
             base_features.heart_line,
             base_features.head_line,
@@ -117,18 +132,35 @@ def _run_test_time_ensemble(decoded_img: np.ndarray, quality_metrics: ImageQuali
                     for p in feat.path
                 ]
 
+    # 2. Perturbation Ensemble on Fast Working Resolution (800px)
+    if max_dim > 800:
+        work_scale = 800.0 / max_dim
+        work_w = int(orig_w * work_scale)
+        work_h = int(orig_h * work_scale)
+        work_img = cv2.resize(decoded_img, (work_w, work_h), interpolation=cv2.INTER_AREA)
+    else:
+        work_img = decoded_img
+
+    # 4 perturbation passes (runs 1..4)
+    pert_tasks = [(work_img, quality_metrics, ang, br) for ang, br in ENSEMBLE_PERTURBATIONS[1:]]
+    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 4)) as pool:
+        pert_results = list(pool.map(_run_single_ensemble_pass, pert_tasks))
+
+    # All 5 passes: base (run 0) + 4 perturbations (runs 1..4)
+    all_archetypes = [base_archetypes] + [r["archetypes"] for r in pert_results]
+
     # Majority voting per line across all 5 ensemble passes
     line_keys = ["heart", "head", "life", "fate"]
     for lk in line_keys:
-        votes = [r["archetypes"][lk] for r in pass_results]
+        votes = [arch[lk] for arch in all_archetypes]
         counts = Counter(votes)
         majority_arch, maj_count = counts.most_common(1)[0]
-        # In case of tie, prioritize original (unperturbed) pass
+        # In case of tie, prioritize original (base) pass
         orig_arch = votes[0]
         if counts[orig_arch] == maj_count:
             majority_arch = orig_arch
 
-        vote_share = round(maj_count / len(pass_results), 2)
+        vote_share = round(maj_count / len(all_archetypes), 2)
         is_low_conf = (vote_share < 0.80)
 
         feat = getattr(base_features, f"{lk}_line", None)
@@ -147,9 +179,9 @@ def _run_test_time_ensemble(decoded_img: np.ndarray, quality_metrics: ImageQuali
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
     logger.info(
-        "Test-time ensembling completed in %.1f ms (%d passes, %.2fs latency)",
+        "Dual-scale test-time ensembling completed in %.1f ms (1 native base + %d fast perturbed passes, %.2fs latency)",
         elapsed_ms,
-        len(ENSEMBLE_PERTURBATIONS),
+        len(pert_tasks),
         elapsed_ms / 1000.0
     )
     return base_features, hand_side, roi_box, elapsed_ms
@@ -162,14 +194,22 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "127.0.0.1"
 
 def _process_palm_image(content: bytes):
-    """Executes CPU-bound OpenCV validation and crease analysis with test-time ensembling."""
+    """Executes CPU-bound OpenCV validation, crease analysis with test-time ensembling, and optical background bokeh portrait generation."""
     is_usable, quality_metrics, decoded_img = validate_palm_image(content)
     if not is_usable or decoded_img is None:
         features, hand_side, roi_box = analyze_palm_creases(decoded_img, quality_metrics)
-        return is_usable, quality_metrics, features, hand_side, roi_box, 0.0
+        return is_usable, quality_metrics, features, hand_side, roi_box, 0.0, None
 
     features, hand_side, roi_box, elapsed_ms = _run_test_time_ensemble(decoded_img, quality_metrics)
-    return is_usable, quality_metrics, features, hand_side, roi_box, elapsed_ms
+    
+    # Dual-Path Bokeh: Generate aesthetic background blur while preserving pristine crease extraction
+    bokeh_base64 = None
+    try:
+        _, bokeh_base64 = generate_palm_bokeh_portrait(decoded_img)
+    except Exception as e:
+        logger.warning(f"Bokeh portrait generation error: {e}")
+
+    return is_usable, quality_metrics, features, hand_side, roi_box, elapsed_ms, bokeh_base64
 
 @router.post("/validate", response_model=ImageQualityMetrics)
 async def validate_image_endpoint(
@@ -258,7 +298,7 @@ async def analyze_palm_endpoint(
             detail=f"Image exceeds size limit of {settings.MAX_IMAGE_SIZE_BYTES // (1024 * 1024)}MB."
         )
 
-    is_usable, quality_metrics, features, hand_side, roi_box, elapsed_ms = await run_in_threadpool(
+    is_usable, quality_metrics, features, hand_side, roi_box, elapsed_ms, bokeh_base64 = await run_in_threadpool(
         _process_palm_image, content
     )
 
@@ -269,6 +309,7 @@ async def analyze_palm_endpoint(
         features=features,
         detected_hand_side=hand_side,
         palm_roi_box=roi_box,
+        isolated_bokeh_image_base64=bokeh_base64,
         analysis_version="2.0",
         detector_model="multiscale_crease_extractor_v2.0",
         ensemble_timing_ms=elapsed_ms,

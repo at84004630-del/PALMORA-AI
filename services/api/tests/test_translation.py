@@ -4,6 +4,13 @@ from services.api.main import app
 from services.api.schemas.readings import PalmReadingReport, ReadingSection
 from services.api.readings.translator import translate_palm_reading, DETERMINISTIC_TRANSLATIONS
 
+@pytest.fixture(autouse=True)
+def offline_mode(monkeypatch):
+    """Enforce deterministic offline dictionary translation for unit tests."""
+    from services.api.config import settings
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+
 def create_sample_report() -> PalmReadingReport:
     return PalmReadingReport(
         id="test-reading-uuid",

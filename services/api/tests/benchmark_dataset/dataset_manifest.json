@@ -1,0 +1,54 @@
+{
+  "version": "1.0.0",
+  "description": "Palmora AI Ground-Truth Morphological & Biometric Benchmark Dataset",
+  "cases": {
+    "standard_right_hand.jpg": {
+      "expected_hand_side": "right",
+      "expected_heart_line": true,
+      "expected_head_line": true,
+      "expected_life_line": true,
+      "expected_fate_line_dominant": false,
+      "is_simian": false,
+      "expected_mount_order": [
+        "venus",
+        "jupiter"
+      ],
+      "min_overall_confidence": 0.6
+    },
+    "simian_crease.jpg": {
+      "expected_hand_side": "right",
+      "expected_heart_line": true,
+      "expected_life_line": true,
+      "is_simian": true,
+      "min_overall_confidence": 0.6
+    },
+    "prominent_fate.jpg": {
+      "expected_hand_side": "right",
+      "expected_heart_line": true,
+      "expected_head_line": true,
+      "expected_life_line": true,
+      "expected_fate_line_dominant": true,
+      "is_simian": false,
+      "min_fate_quality_score": 0.45,
+      "min_overall_confidence": 0.6
+    },
+    "faint_fate.jpg": {
+      "expected_hand_side": "right",
+      "expected_heart_line": true,
+      "expected_head_line": true,
+      "expected_life_line": true,
+      "expected_fate_line_dominant": false,
+      "is_simian": false,
+      "max_fate_quality_score": 0.45,
+      "min_overall_confidence": 0.6
+    },
+    "real_hand_benchmark.jpg": {
+      "expected_hand_side": "right",
+      "expected_heart_line": true,
+      "expected_head_line": true,
+      "expected_life_line": true,
+      "is_simian": false,
+      "min_overall_confidence": 0.75
+    }
+  }
+}

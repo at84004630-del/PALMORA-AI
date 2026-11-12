@@ -27,6 +27,7 @@ export interface CreaseFeature {
   status: FeatureStatus;
   path: Point2D[];
   pixel_path?: Point2D[];
+  bezier_control_points?: Point2D[] | null;
   measurements: Record<string, any>;
   detector_version?: string;
   quality_score?: number | null;
@@ -41,6 +42,9 @@ export interface MountContour {
   relative_elevation: number; // 0.0 - 1.0 from photometric shading
   prominence: 'flat' | 'moderate' | 'developed' | 'prominent' | string;
   symbolic_significance?: string;
+  center?: Point2D | null;
+  radius?: number | null;
+  confidence?: number | null;
 }
 
 export interface MountTopography {
@@ -75,6 +79,10 @@ export interface PalmFeatures {
   hand_side?: 'left' | 'right' | 'unknown' | string;
   mount_topography?: MountTopography | null;
   elemental_constitution?: ElementalConstitution | null;
+  landmarks?: Point2D[] | null;
+  landmarks_confidence?: number | null;
+  hand_side_confidence?: number | null;
+  overall_confidence?: number | null;
 }
 
 export interface PalmAnalysisResult {
@@ -85,6 +93,7 @@ export interface PalmAnalysisResult {
   palm_roi_box?: number[] | null;
   analysis_version: string;
   detector_model: string;
+  isolated_bokeh_image_base64?: string | null;
   disclaimer: string;
 }
 
@@ -117,6 +126,10 @@ export interface PalmReadingReport {
   language?: string;
   features?: PalmFeatures;
   roi_box?: number[];
+  confidence_score?: number;
+  primary_tradition?: string;
+  tradition_weighting?: Record<string, number>;
+  confidence_advisory?: string;
 }
 
 export interface GenerateReadingRequest {
@@ -378,6 +391,47 @@ export interface HabitAlignmentSummary {
   correlated_tension_reduction_pct: number;
   habit_alignment_score: number; // 0 - 100
   clinical_mindfulness_insight: string;
+}
+
+// Product Growth Telemetry & Conversion Funnel Types
+export interface FunnelMetricStage {
+  rate_pct: number;
+  numerator: number;
+  denominator: number;
+}
+
+export interface TelemetryData {
+  telemetry_summary: {
+    total_events_logged: number;
+    date_range: string;
+    active_referral_campaigns: number;
+  };
+  raw_counts: Record<string, number>;
+  conversion_funnel: {
+    visitor_to_scan_started?: FunnelMetricStage;
+    scan_started_to_completed?: FunnelMetricStage;
+    scan_completed_to_reading?: FunnelMetricStage;
+    reading_to_share_card_created?: FunnelMetricStage;
+    pricing_to_purchase_verified?: FunnelMetricStage;
+    referral_visit_to_completed_reading?: FunnelMetricStage;
+    visitor_to_scan?: FunnelMetricStage;
+    scan_completion?: FunnelMetricStage;
+    reading_generation_success?: FunnelMetricStage;
+    share_card_creation?: FunnelMetricStage;
+    share_distribution?: FunnelMetricStage;
+    referral_to_completed_reading?: FunnelMetricStage;
+    paid_checkout_conversion?: FunnelMetricStage;
+  };
+  referrals: Record<string, any>;
+  operational_economics?: {
+    estimated_cv_cost_per_reading_usd: number;
+    estimated_llm_cost_per_reading_usd: number;
+    privacy_guarantee: string;
+  };
+  audit_policy?: {
+    disallowed_keys_stripped: string[];
+    privacy_standard: string;
+  };
 }
 
 

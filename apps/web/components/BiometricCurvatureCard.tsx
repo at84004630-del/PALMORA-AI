@@ -22,6 +22,7 @@ interface BiometricCurvatureCardProps {
   features?: PalmFeatures | null;
   dominantHand?: string;
   isUnlocked?: boolean;
+  onUnlockClick?: () => void;
 }
 
 interface ElementalProfile {
@@ -38,6 +39,7 @@ export default function BiometricCurvatureCard({
   features,
   dominantHand = 'right',
   isUnlocked = false,
+  onUnlockClick,
 }: BiometricCurvatureCardProps) {
   // Extract real measurements or calibrated defaults from CV features
   const heartMeasurements = features?.heart_line?.measurements || {};
@@ -58,6 +60,17 @@ export default function BiometricCurvatureCard({
 
   // Determine Elemental Archetype based on curvature and orientation metrics
   const determineElementalArchetype = (): ElementalProfile => {
+    if (!isUnlocked) {
+      return {
+        element: 'Earth',
+        title: 'Calibrated Archetype Profile',
+        icon: Mountain,
+        color: '#C8AA6E',
+        bgGradient: 'from-amber-950/20 via-[#0B0E1B] to-purple-950/20',
+        description: 'Deep-dive geometric synthesis calculates chord-arc deflection, contrast depth salience, and traditional elemental constitutional balance.',
+        temperament: 'Calibrated Constitutional Balance',
+      };
+    }
     const avgCurvature = (heartCurvature + headCurvature + lifeCurvature) / 3;
     if (avgCurvature > 0.28) {
       return {
@@ -183,22 +196,22 @@ export default function BiometricCurvatureCard({
                   Heart Line Arc
                 </span>
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 font-mono">
-                  {heartAngle.toFixed(1)}° Deflection
+                  {isUnlocked ? `${heartAngle.toFixed(1)}° Deflection` : '•••° Deflection'}
                 </span>
               </div>
               <div className="flex items-baseline justify-between">
                 <span className="text-xs text-gray-400">Chord-Arc Deviation</span>
-                <span className="text-xl font-bold font-mono text-white">{(heartCurvature * 100).toFixed(1)}%</span>
+                <span className="text-xl font-bold font-mono text-white">{isUnlocked ? `${(heartCurvature * 100).toFixed(1)}%` : '•••%'}</span>
               </div>
               <div className="w-full bg-gray-900 rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-gradient-to-r from-rose-500 to-pink-400 h-2 rounded-full"
-                  style={{ width: `${Math.min(100, heartCurvature * 250)}%` }}
+                  style={{ width: `${isUnlocked ? Math.min(100, heartCurvature * 250) : 45}%` }}
                 />
               </div>
               <div className="flex justify-between text-[11px] text-gray-400">
-                <span>Contrast Depth: {(heartDepth * 100).toFixed(0)}%</span>
-                <span className="text-gray-300">{heartCurvature > 0.2 ? 'Deep Sweeping Arc' : 'Moderate Arc'}</span>
+                <span>Contrast Depth: {isUnlocked ? `${(heartDepth * 100).toFixed(0)}%` : '•••%'}</span>
+                <span className="text-gray-300">{isUnlocked ? (heartCurvature > 0.2 ? 'Deep Sweeping Arc' : 'Moderate Arc') : 'Calibrated Vector Arc'}</span>
               </div>
             </div>
 
@@ -210,22 +223,22 @@ export default function BiometricCurvatureCard({
                   Head Line Slope
                 </span>
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">
-                  {headAngle.toFixed(1)}° Angle
+                  {isUnlocked ? `${headAngle.toFixed(1)}° Angle` : '•••° Angle'}
                 </span>
               </div>
               <div className="flex items-baseline justify-between">
                 <span className="text-xs text-gray-400">Linearity Score</span>
-                <span className="text-xl font-bold font-mono text-white">{(headCurvature * 100).toFixed(1)}%</span>
+                <span className="text-xl font-bold font-mono text-white">{isUnlocked ? `${(headCurvature * 100).toFixed(1)}%` : '•••%'}</span>
               </div>
               <div className="w-full bg-gray-900 rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-gradient-to-r from-amber-500 to-yellow-400 h-2 rounded-full"
-                  style={{ width: `${Math.min(100, headCurvature * 300)}%` }}
+                  style={{ width: `${isUnlocked ? Math.min(100, headCurvature * 300) : 55}%` }}
                 />
               </div>
               <div className="flex justify-between text-[11px] text-gray-400">
-                <span>Contrast Depth: {(headDepth * 100).toFixed(0)}%</span>
-                <span className="text-gray-300">{headCurvature < 0.15 ? 'Linear Pragmatic' : 'Creative Sloped'}</span>
+                <span>Contrast Depth: {isUnlocked ? `${(headDepth * 100).toFixed(0)}%` : '•••%'}</span>
+                <span className="text-gray-300">{isUnlocked ? (headCurvature < 0.15 ? 'Linear Pragmatic' : 'Creative Sloped') : 'Calibrated Vector Slope'}</span>
               </div>
             </div>
 
@@ -237,22 +250,22 @@ export default function BiometricCurvatureCard({
                   Life Line Radius
                 </span>
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                  {lifeAngle.toFixed(1)}° Descent
+                  {isUnlocked ? `${lifeAngle.toFixed(1)}° Descent` : '•••° Descent'}
                 </span>
               </div>
               <div className="flex items-baseline justify-between">
                 <span className="text-xs text-gray-400">Circumference Sweep</span>
-                <span className="text-xl font-bold font-mono text-white">{(lifeCurvature * 100).toFixed(1)}%</span>
+                <span className="text-xl font-bold font-mono text-white">{isUnlocked ? `${(lifeCurvature * 100).toFixed(1)}%` : '•••%'}</span>
               </div>
               <div className="w-full bg-gray-900 rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full"
-                  style={{ width: `${Math.min(100, lifeCurvature * 200)}%` }}
+                  style={{ width: `${isUnlocked ? Math.min(100, lifeCurvature * 200) : 65}%` }}
                 />
               </div>
               <div className="flex justify-between text-[11px] text-gray-400">
-                <span>Contrast Depth: {(lifeDepth * 100).toFixed(0)}%</span>
-                <span className="text-gray-300">{lifeCurvature > 0.35 ? 'Generous Vitality' : 'Focused Vitality'}</span>
+                <span>Contrast Depth: {isUnlocked ? `${(lifeDepth * 100).toFixed(0)}%` : '•••%'}</span>
+                <span className="text-gray-300">{isUnlocked ? (lifeCurvature > 0.35 ? 'Generous Vitality' : 'Focused Vitality') : 'Calibrated Vitality Sweep'}</span>
               </div>
             </div>
           </div>
@@ -274,13 +287,24 @@ export default function BiometricCurvatureCard({
               Discover your hand's physical chord-arc deflection indices, contrast depth salience, and your classic Elemental Archetype (Earth, Air, Fire, Water).
             </p>
             <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-              <Link
-                href="/pricing?product=premium_report"
-                className="btn-gold py-3 px-6 rounded-2xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl hover:scale-105 transition-transform w-full sm:w-auto"
-              >
-                <span>Unlock Deep-Dive Report ($4.99 / ₹399)</span>
-                <ArrowRight className="w-4 h-4 text-black" />
-              </Link>
+              {onUnlockClick ? (
+                <button
+                  type="button"
+                  onClick={onUnlockClick}
+                  className="btn-gold py-3 px-6 rounded-2xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl hover:scale-105 transition-transform w-full sm:w-auto"
+                >
+                  <span>Unlock Deep-Dive Report ($4.99 / ₹399)</span>
+                  <ArrowRight className="w-4 h-4 text-black" />
+                </button>
+              ) : (
+                <Link
+                  href="/pricing?product=premium_report"
+                  className="btn-gold py-3 px-6 rounded-2xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl hover:scale-105 transition-transform w-full sm:w-auto"
+                >
+                  <span>Unlock Deep-Dive Report ($4.99 / ₹399)</span>
+                  <ArrowRight className="w-4 h-4 text-black" />
+                </Link>
+              )}
               <Link
                 href="/pricing"
                 className="py-3 px-5 rounded-2xl text-xs font-semibold text-gray-300 hover:text-white bg-[#070913]/80 border border-gray-800 hover:border-gray-700 transition-colors w-full sm:w-auto text-center"

@@ -40,6 +40,7 @@ interface PalmConsultationSectionProps {
   dualReport?: DualHandReadingReport | null;
   features?: PalmFeatures | null;
   onHistoryChange?: (consultations: PalmConsultationResponse[]) => void;
+  onUnlockClick?: () => void;
 }
 
 function getCategorySuggestions(cat: CategoryConfig, langCode: string = 'en'): string[] {
@@ -191,7 +192,7 @@ const DUAL_EVOLUTION_CATEGORY: CategoryConfig = {
   ],
 };
 
-export default function PalmConsultationSection({ report, dualReport, features, onHistoryChange }: PalmConsultationSectionProps) {
+export default function PalmConsultationSection({ report, dualReport, features, onHistoryChange, onUnlockClick }: PalmConsultationSectionProps) {
   const availableCategories = dualReport
     ? [DUAL_EVOLUTION_CATEGORY, ...CATEGORIES]
     : CATEGORIES;
@@ -244,11 +245,8 @@ export default function PalmConsultationSection({ report, dualReport, features, 
       });
 
       // Update in-memory state and persist locally
-      setHistory((prev) => {
-        const next = [...prev, response];
-        onHistoryChange?.(next);
-        return next;
-      });
+      setHistory((prev) => [...prev, response]);
+      onHistoryChange?.([...history, response]);
       if (activeReadingId) {
         saveLocalConsultation(activeReadingId, response);
       }
@@ -376,10 +374,21 @@ export default function PalmConsultationSection({ report, dualReport, features, 
             )}
           </div>
           {!quota.isUnlimited && (
-            <Link href="/pricing" className="text-[#C8AA6E] hover:underline flex items-center gap-1 font-semibold text-[11px]">
-              <span>Need more inquiries? Upgrade</span>
-              <ArrowRight className="w-3 h-3" />
-            </Link>
+            onUnlockClick ? (
+              <button
+                type="button"
+                onClick={onUnlockClick}
+                className="text-[#C8AA6E] hover:underline flex items-center gap-1 font-semibold text-[11px]"
+              >
+                <span>Need more inquiries? Upgrade</span>
+                <ArrowRight className="w-3 h-3" />
+              </button>
+            ) : (
+              <Link href="/pricing" className="text-[#C8AA6E] hover:underline flex items-center gap-1 font-semibold text-[11px]">
+                <span>Need more inquiries? Upgrade</span>
+                <ArrowRight className="w-3 h-3" />
+              </Link>
+            )
           )}
         </div>
 
@@ -424,13 +433,24 @@ export default function PalmConsultationSection({ report, dualReport, features, 
                 </p>
               </div>
             </div>
-            <Link
-              href="/pricing?product=premium_report"
-              className="btn-gold py-2.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider shrink-0 flex items-center gap-1.5 shadow-md hover:scale-105 transition-transform"
-            >
-              <span>Upgrade Inquiries</span>
-              <ArrowRight className="w-3.5 h-3.5 text-black" />
-            </Link>
+            {onUnlockClick ? (
+              <button
+                type="button"
+                onClick={onUnlockClick}
+                className="btn-gold py-2.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider shrink-0 flex items-center gap-1.5 shadow-md hover:scale-105 transition-transform"
+              >
+                <span>Upgrade Inquiries</span>
+                <ArrowRight className="w-3.5 h-3.5 text-black" />
+              </button>
+            ) : (
+              <Link
+                href="/pricing?product=premium_report"
+                className="btn-gold py-2.5 px-4 rounded-xl text-xs font-bold uppercase tracking-wider shrink-0 flex items-center gap-1.5 shadow-md hover:scale-105 transition-transform"
+              >
+                <span>Upgrade Inquiries</span>
+                <ArrowRight className="w-3.5 h-3.5 text-black" />
+              </Link>
+            )}
           </div>
         ) : (
           <div className="mt-5 flex flex-col gap-2">

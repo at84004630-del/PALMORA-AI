@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 
 export type AlignmentStatus =
@@ -20,6 +21,8 @@ export type AlignmentStatus =
   | 'shift_right'
   | 'too_dark'
   | 'too_bright'
+  | 'backlight_glare'
+  | 'background_interference'
   | 'optimal';
 
 export type GuideScale = 'compact' | 'normal' | 'closeup';
@@ -31,7 +34,9 @@ interface PalmFramingReticleProps {
   statusMessage?: string;
   guideScale: GuideScale;
   autoSnapCountdown: number | null;
+  fillPercentage?: number;
   onScaleChange: (scale: GuideScale) => void;
+  onCancelCountdown?: () => void;
 }
 
 export function PalmFramingReticle({
@@ -41,10 +46,16 @@ export function PalmFramingReticle({
   statusMessage,
   guideScale,
   autoSnapCountdown,
+  fillPercentage,
   onScaleChange,
+  onCancelCountdown,
 }: PalmFramingReticleProps) {
   const isOptimal = status === 'optimal';
-  const isWarning = status === 'too_dark' || status === 'too_bright';
+  const isWarning =
+    status === 'too_dark' ||
+    status === 'too_bright' ||
+    status === 'backlight_glare' ||
+    status === 'background_interference';
 
   // Scale multipliers for comfort fit
   const scaleClass =
@@ -89,6 +100,10 @@ export function PalmFramingReticle({
       case 'too_dark':
       case 'too_bright':
         return <Sun className="w-4 h-4 text-amber-400" />;
+      case 'backlight_glare':
+        return <Sun className="w-4 h-4 text-amber-400 animate-pulse" />;
+      case 'background_interference':
+        return <AlertCircle className="w-4 h-4 text-amber-400" />;
       default:
         return <Hand className="w-4 h-4 text-[#C8AA6E]" />;
     }
@@ -111,6 +126,10 @@ export function PalmFramingReticle({
         return 'Low light: Face towards a light source';
       case 'too_bright':
         return 'Too much glare: Shield direct light';
+      case 'backlight_glare':
+        return 'Harsh backlight: Point camera away from lights';
+      case 'background_interference':
+        return 'Room background detected: Place hand inside guide';
       default:
         return 'Align open palm inside outline';
     }
@@ -272,15 +291,24 @@ export function PalmFramingReticle({
 
         {/* Hands-Free Auto-Snap Countdown Overlay */}
         {autoSnapCountdown !== null && autoSnapCountdown > 0 && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 backdrop-blur-[2px] animate-in zoom-in-95 duration-200">
-            <div className="relative flex items-center justify-center w-28 h-28 rounded-full border-4 border-emerald-400 bg-black/80 shadow-[0_0_40px_rgba(16,185,129,0.8)] animate-pulse">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-[3px] animate-in zoom-in-95 duration-200 pointer-events-auto z-20">
+            <div className="relative flex items-center justify-center w-28 h-28 rounded-full border-4 border-emerald-400 bg-black/85 shadow-[0_0_40px_rgba(16,185,129,0.8)] animate-pulse">
               <span className="text-5xl font-black font-serif text-emerald-400">
                 {autoSnapCountdown}
               </span>
             </div>
-            <span className="mt-3 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 text-xs font-bold tracking-wider uppercase shadow-lg">
+            <span className="mt-3 px-3 py-1 rounded-full bg-emerald-950/90 border border-emerald-500/50 text-emerald-300 text-xs font-bold tracking-wider uppercase shadow-lg">
               Hold Still • Snapping...
             </span>
+            {onCancelCountdown && (
+              <button
+                type="button"
+                onClick={onCancelCountdown}
+                className="mt-3.5 px-3.5 py-1.5 rounded-xl bg-gray-900/90 hover:bg-gray-800 border border-gray-700 text-gray-300 hover:text-white text-xs font-semibold transition-colors shadow-lg"
+              >
+                Cancel Auto-Snap
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -299,6 +327,35 @@ export function PalmFramingReticle({
           {getStatusIcon()}
           <span>{getStatusText()}</span>
         </div>
+
+        {/* On-Device ONNX WebAssembly 60 FPS Indicator */}
+        <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[10px] text-emerald-300 font-mono shadow-md backdrop-blur-md">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span>ONNX WebAssembly 60 FPS Engine Active</span>
+        </div>
+
+        {/* Real-time 75% Frame Fill Progress Meter */}
+        {fillPercentage !== undefined && fillPercentage > 5 && (
+          <div className="w-full max-w-[240px] flex flex-col gap-1 items-center bg-black/75 backdrop-blur-md px-3 py-1.5 rounded-xl border border-gray-800 shadow-lg animate-in fade-in duration-200">
+            <div className="w-full flex items-center justify-between text-[10px] font-mono">
+              <span className="text-gray-400">Target Fill: 75%</span>
+              <span className={fillPercentage >= 65 && fillPercentage <= 85 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                {fillPercentage}% {fillPercentage >= 65 && fillPercentage <= 85 ? '✓ Optimal' : fillPercentage < 65 ? '↑ Closer' : '↓ Back'}
+              </span>
+            </div>
+            <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden relative">
+              <div className="absolute top-0 bottom-0 left-[75%] w-0.5 bg-white/60 z-10" title="75% Target Fill" />
+              <div
+                className={`h-full transition-all duration-150 rounded-full ${
+                  fillPercentage >= 65 && fillPercentage <= 85
+                    ? 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.8)]'
+                    : 'bg-amber-400'
+                }`}
+                style={{ width: `${Math.min(100, fillPercentage)}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Wrist positioning prompt */}
         <span className="text-[10px] text-gray-400 tracking-wide">

@@ -19,3 +19,6 @@ build/
 .env.local
 .DS_Store
 Thumbs.db
+
+# Scratch & temporary diagnostic files
+scratch/

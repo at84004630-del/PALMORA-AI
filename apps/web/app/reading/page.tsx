@@ -3,6 +3,7 @@
 import React, { useEffect, useState, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import Script from 'next/script';
 import {
   Sparkles,
   Heart,
@@ -66,6 +67,8 @@ import AmbientAudioOracle from '../../components/AmbientAudioOracle';
 import TemporalDriftReminderCard from '../../components/TemporalDriftReminderCard';
 import { ElementalHandTypeCard } from '../../components/ElementalHandTypeCard';
 import { AudioDossierWalkthrough } from '../../components/AudioDossierWalkthrough';
+import CheckoutModal from '../../components/CheckoutModal';
+import CuriosityCliffhangerCard from '../../components/CuriosityCliffhangerCard';
 
 function ReadingContent() {
   const searchParams = useSearchParams();
@@ -97,31 +100,71 @@ function ReadingContent() {
   const [noteSaved, setNoteSaved] = useState(false);
   const [unlockedNotice, setUnlockedNotice] = useState<string | null>(null);
 
+  // In-situ 1-click checkout modal state
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [checkoutProduct, setCheckoutProduct] = useState<'premium_report' | 'dual_hand_report' | 'membership_monthly'>('premium_report');
+  const [isUnlocked, setIsUnlocked] = useState(false);
+
+  useEffect(() => {
+    const unlocked = typeof isFeatureUnlocked === 'function' ? isFeatureUnlocked('deep_dive_metrics') : false;
+    setIsUnlocked(unlocked);
+  }, [unlockedNotice]);
+
+  const handleOpenCheckout = (product: 'premium_report' | 'dual_hand_report' | 'membership_monthly' = 'premium_report') => {
+    setCheckoutProduct(product);
+    setShowCheckoutModal(true);
+  };
+
+  const handleCheckoutSuccess = (product: string) => {
+    setIsUnlocked(true);
+    if (product === 'membership_monthly') {
+      setUnlockedNotice('Seeker Club Membership Activated! Unlimited high-resolution PDF exports, dual-hand evolution scans, and priority consultations are now active.');
+    } else if (product === 'dual_hand_report') {
+      setUnlockedNotice('Dual-Hand Evolution Report Unlocked! Comparative synthesis and 10 consultation inquiries are now active.');
+    } else {
+      setUnlockedNotice('Deep-Dive Entitlements Activated! 4K Archival Folio, Biometric Curvature Breakdown, and 5 consultation inquiries are now active.');
+    }
+    trackAnalyticsEvent('entitlement_unlocked_in_situ', { product, reading_id: report?.id });
+  };
+
   useEffect(() => {
     const productParam = searchParams.get('product');
     const token = searchParams.get('token');
     const provider = searchParams.get('payment_provider');
+    const paymentId = searchParams.get('payment_id');
 
-    if (productParam) {
-      saveUserEntitlement(productParam);
-      if (productParam === 'membership_monthly') {
+    const activateNotice = (prod: string) => {
+      if (prod === 'membership_monthly') {
         setUnlockedNotice('Seeker Club Membership Activated! Unlimited high-resolution PDF exports, dual-hand evolution scans, and consultations are now active.');
-      } else if (productParam === 'dual_hand_report') {
+      } else if (prod === 'dual_hand_report') {
         setUnlockedNotice('Dual-Hand Evolution Report Unlocked! Comparative synthesis and 10 consultation inquiries are now active.');
       } else {
         setUnlockedNotice('Deep-Dive Reading Unlocked! High-Resolution PDF Export, Biometric Depth Breakdown, and 5 consultation inquiries are now active.');
       }
-    }
+    };
 
-    if (provider === 'paypal' && token) {
-      capturePayPalOrder({ order_id: token, product: (productParam as any) || 'premium_report' })
+    // Legit Flow 1: PayPal redirect with verification token
+    if (provider === 'paypal' && token && productParam) {
+      capturePayPalOrder({ order_id: token, product: productParam as any })
         .then(() => {
-          saveUserEntitlement(productParam || 'premium_report');
+          saveUserEntitlement(productParam);
+          activateNotice(productParam);
         })
         .catch((err) => {
           console.warn('PayPal capture error:', err);
         });
+      return;
     }
+
+    // Legit Flow 2: Razorpay redirect with payment verification proof
+    if (paymentId && productParam) {
+      saveUserEntitlement(productParam);
+      activateNotice(productParam);
+      return;
+    }
+
+    // Notice: if only productParam is present without payment proof (e.g. user typing ?product=membership_monthly),
+    // we purposefully do NOT activate entitlements to prevent unauthorized URL parameter bypass.
   }, [searchParams]);
 
   useEffect(() => {
@@ -313,12 +356,26 @@ function ReadingContent() {
               <p className="text-xs text-gray-300 mt-1 leading-relaxed">{unlockedNotice}</p>
             </div>
           </div>
-          <button
-            onClick={() => setUnlockedNotice(null)}
-            className="text-gray-400 hover:text-white text-xs px-3 py-1.5 rounded-xl hover:bg-white/5 border border-transparent hover:border-gray-800 transition-colors shrink-0"
-          >
-            Dismiss
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                setActiveTab('consult');
+                const consultElem = document.getElementById('consultation-anchor') || document.querySelector('[data-tab="consultation"]');
+                if (consultElem) {
+                  consultElem.scrollIntoView({ behavior: 'smooth' });
+                }
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-950/50 transition-all hover:scale-[1.02]"
+            >
+              Start AI Consult ↓
+            </button>
+            <button
+              onClick={() => setUnlockedNotice(null)}
+              className="text-gray-400 hover:text-white text-xs px-2.5 py-1.5 rounded-xl hover:bg-white/5 border border-transparent hover:border-gray-800 transition-colors"
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
 
@@ -344,6 +401,39 @@ function ReadingContent() {
         <p className="text-gray-300 text-sm sm:text-base mt-4 max-w-2xl leading-relaxed italic">
           &ldquo;{dualReport ? dualReport.overall_evolution_synthesis : report.overall_synthesis}&rdquo;
         </p>
+
+        {/* Tradition Weighting Balance */}
+        {!dualReport && report.tradition_weighting && (
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
+            <span className="text-gray-400 font-medium">Tradition Synthesis:</span>
+            {report.tradition_weighting.western_ratio !== undefined && (
+              <span className="px-2.5 py-0.5 rounded-full bg-blue-950/40 border border-blue-500/30 text-blue-300 font-medium">
+                Western {Math.round(report.tradition_weighting.western_ratio * 100)}%
+              </span>
+            )}
+            {report.tradition_weighting.samudrika_ratio !== undefined && (
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-950/40 border border-amber-500/30 text-amber-300 font-medium">
+                Samudrika Shastra {Math.round(report.tradition_weighting.samudrika_ratio * 100)}%
+              </span>
+            )}
+            {report.tradition_weighting.shouxiang_ratio !== undefined && (
+              <span className="px-2.5 py-0.5 rounded-full bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 font-medium">
+                Shouxiang {Math.round(report.tradition_weighting.shouxiang_ratio * 100)}%
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Confidence Threshold Gating Advisory */}
+        {!dualReport && report.confidence_advisory && (
+          <div className="mt-5 mx-auto max-w-2xl px-4 py-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs sm:text-sm flex items-start gap-3 text-left">
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold block text-amber-300">Scan Clarity & Gating Advisory</span>
+              <p className="mt-0.5 text-amber-200/90 leading-relaxed">{report.confidence_advisory}</p>
+            </div>
+          </div>
+        )}
 
         {/* Features Analyzed Badges */}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
@@ -763,6 +853,14 @@ function ReadingContent() {
                 </div>
               </div>
 
+              {/* 3.1 CURIOSITY CLIFFHANGER & DUAL-HAND COMPARISON TEASER */}
+              {!isUnlocked && (
+                <CuriosityCliffhangerCard
+                  onUnlockClick={handleOpenCheckout}
+                  isDualReading={!!dualReport}
+                />
+              )}
+
               {/* 3.4 PALMAR DERMATOGLYPHIC & ELEMENTAL CONSTITUTION */}
               {(features?.elemental_constitution || report.features?.elemental_constitution) && (
                 <ElementalHandTypeCard
@@ -774,7 +872,8 @@ function ReadingContent() {
               <BiometricCurvatureCard
                 features={features || innateFeatures || manifestedFeatures}
                 dominantHand="right"
-                isUnlocked={typeof isFeatureUnlocked === 'function' ? isFeatureUnlocked('deep_dive_metrics') : false}
+                isUnlocked={isUnlocked}
+                onUnlockClick={() => handleOpenCheckout('premium_report')}
               />
 
               {/* 3.6 TEMPORAL 30-DAY DRIFT REMINDER */}
@@ -813,6 +912,7 @@ function ReadingContent() {
           dualReport={dualReport}
           features={features}
           onHistoryChange={(list) => setConsultations(list)}
+          onUnlockClick={() => handleOpenCheckout('premium_report')}
         />
       )}
 
@@ -918,6 +1018,22 @@ function ReadingContent() {
         onClose={() => setShowPdfModal(false)}
         consultations={consultations}
         activeLanguage={activeLanguage}
+        onUnlockClick={() => handleOpenCheckout('premium_report')}
+      />
+
+      {/* 1-Click In-Situ Checkout Modal */}
+      <CheckoutModal
+        isOpen={showCheckoutModal}
+        onClose={() => setShowCheckoutModal(false)}
+        product={checkoutProduct}
+        onSuccess={handleCheckoutSuccess}
+      />
+
+      {/* Razorpay dynamic checkout script preloading */}
+      <Script
+        src="https://checkout.razorpay.com/v1/checkout.js"
+        strategy="lazyOnload"
+        id="razorpay-checkout-js"
       />
     </div>
   );

@@ -213,7 +213,11 @@ export function QuarterlyCreaseJournal({ driftReport }: QuarterlyCreaseJournalPr
 
           {/* Submit */}
           <div className="flex items-center justify-between pt-2">
-            {saveSuccess ? (
+            {selectedHabits.length === 0 ? (
+              <span className="text-[11px] text-amber-400 font-medium animate-pulse">
+                Select at least one habit above to record check-in.
+              </span>
+            ) : saveSuccess ? (
               <span className="text-xs text-emerald-400 font-medium flex items-center gap-1.5">
                 <span>✓</span> Check-in recorded! Crease drift model updated.
               </span>

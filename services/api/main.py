@@ -44,14 +44,21 @@ async def lifespan(app: FastAPI):
     if settings.DATABASE_ENABLED:
         import asyncpg
         logger.info("Initializing asyncpg connection pool...")
-        app.state.db_pool = await asyncpg.create_pool(
-            dsn=settings.DATABASE_URL,
-            min_size=settings.DATABASE_POOL_MIN_SIZE,
-            max_size=settings.DATABASE_POOL_MAX_SIZE,
-            timeout=settings.DATABASE_CONNECT_TIMEOUT_SECONDS,
-            command_timeout=settings.DATABASE_STATEMENT_TIMEOUT_SECONDS,
-        )
-        logger.info("asyncpg connection pool initialized successfully.")
+        try:
+            app.state.db_pool = await asyncpg.create_pool(
+                dsn=settings.DATABASE_URL,
+                min_size=settings.DATABASE_POOL_MIN_SIZE,
+                max_size=settings.DATABASE_POOL_MAX_SIZE,
+                timeout=settings.DATABASE_CONNECT_TIMEOUT_SECONDS,
+                command_timeout=settings.DATABASE_STATEMENT_TIMEOUT_SECONDS,
+            )
+            logger.info("asyncpg connection pool initialized successfully.")
+        except Exception as exc:
+            logger.warning(
+                f"Failed to connect to PostgreSQL/Supabase database ({exc}). "
+                "Operating in resilient ephemeral in-memory mode."
+            )
+            app.state.db_pool = None
     else:
         app.state.db_pool = None
 

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
+import Script from 'next/script';
 import { useSearchParams } from 'next/navigation';
 import {
   Sparkles,
@@ -674,6 +675,13 @@ function PricingContent() {
           </div>
         </div>
       )}
+
+      {/* Razorpay dynamic checkout script preloading */}
+      <Script
+        src="https://checkout.razorpay.com/v1/checkout.js"
+        strategy="lazyOnload"
+        id="razorpay-checkout-js"
+      />
     </div>
   );
 }

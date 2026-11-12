@@ -24,7 +24,18 @@ ALLOWED_EVENT_NAMES = {
     "pricing_visited",
     "checkout_started",
     "checkout_initiated",
+    "modal_checkout_initiated",
     "purchase_verified",
+    "payment_success",
+    "checkout_completed",
+    "dual_scan_step1_completed",
+    "dual_scan_step2_completed",
+    "dual_comparison_generated",
+    "pdf_generated",
+    "pdf_preview_opened",
+    "system_print_invoked",
+    "reading_translation_requested",
+    "entitlement_unlocked_in_situ",
     "account_deletion_requested"
 }
 
@@ -121,13 +132,17 @@ async def get_startup_metrics_endpoint():
     counts: Dict[str, int] = {}
     for entry in ANALYTICS_LOGS:
         ev = entry["event_name"]
-        # Normalize legacy event names
-        if ev == "landing_visit":
+        # Normalize event names across single and dual hand flows and payment providers
+        if ev in ("landing_visit", "landing_view"):
             ev = "landing_view"
-        elif ev == "pricing_visited":
+        elif ev in ("pricing_visited", "pricing_viewed"):
             ev = "pricing_viewed"
-        elif ev == "checkout_initiated":
+        elif ev in ("checkout_initiated", "checkout_started", "modal_checkout_initiated"):
             ev = "checkout_started"
+        elif ev in ("payment_success", "checkout_completed", "purchase_verified"):
+            ev = "purchase_verified"
+        elif ev in ("dual_comparison_generated", "reading_generated"):
+            ev = "reading_generated"
 
         counts[ev] = counts.get(ev, 0) + 1
 
@@ -160,6 +175,15 @@ async def get_startup_metrics_endpoint():
         if referral_visits > 0 else 0.0
     )
 
+    # Reusable metric blocks
+    m_visitor = {"rate_pct": round(visitor_to_scan_pct, 1), "numerator": scans_started, "denominator": landing_views}
+    m_scan_comp = {"rate_pct": round(scan_completion_pct, 1), "numerator": scans_completed, "denominator": scans_started}
+    m_reading_gen = {"rate_pct": round(reading_generation_pct, 1), "numerator": readings_generated, "denominator": scans_completed}
+    m_share_card = {"rate_pct": round(share_card_creation_pct, 1), "numerator": share_cards_created, "denominator": readings_generated}
+    m_share_dist = {"rate_pct": round(share_action_pct, 1), "numerator": share_actions, "denominator": share_cards_created}
+    m_referral = {"rate_pct": round(referral_conversion_pct, 1), "numerator": total_referral_completions, "denominator": referral_visits}
+    m_paid_conv = {"rate_pct": round(paid_conversion_pct, 1), "numerator": purchases_verified, "denominator": pricing_views}
+
     return {
         "telemetry_summary": {
             "total_events_logged": len(ANALYTICS_LOGS),
@@ -182,41 +206,22 @@ async def get_startup_metrics_endpoint():
             "account_deletion_requested": deletions_requested
         },
         "conversion_funnel": {
-            "visitor_to_scan": {
-                "rate_pct": round(visitor_to_scan_pct, 1),
-                "numerator": scans_started,
-                "denominator": landing_views
-            },
-            "scan_completion": {
-                "rate_pct": round(scan_completion_pct, 1),
-                "numerator": scans_completed,
-                "denominator": scans_started
-            },
-            "reading_generation_success": {
-                "rate_pct": round(reading_generation_pct, 1),
-                "numerator": readings_generated,
-                "denominator": scans_completed
-            },
-            "share_card_creation": {
-                "rate_pct": round(share_card_creation_pct, 1),
-                "numerator": share_cards_created,
-                "denominator": readings_generated
-            },
-            "share_distribution": {
-                "rate_pct": round(share_action_pct, 1),
-                "numerator": share_actions,
-                "denominator": share_cards_created
-            },
-            "referral_to_completed_reading": {
-                "rate_pct": round(referral_conversion_pct, 1),
-                "numerator": total_referral_completions,
-                "denominator": referral_visits
-            },
-            "paid_checkout_conversion": {
-                "rate_pct": round(paid_conversion_pct, 1),
-                "numerator": purchases_verified,
-                "denominator": pricing_views
-            }
+            # Canonical frontend keys
+            "visitor_to_scan_started": m_visitor,
+            "scan_started_to_completed": m_scan_comp,
+            "scan_completed_to_reading": m_reading_gen,
+            "reading_to_share_card_created": m_share_card,
+            "pricing_to_purchase_verified": m_paid_conv,
+            "referral_visit_to_completed_reading": m_referral,
+
+            # Legacy aliases for backward compatibility with existing tests and scripts
+            "visitor_to_scan": m_visitor,
+            "scan_completion": m_scan_comp,
+            "reading_generation_success": m_reading_gen,
+            "share_card_creation": m_share_card,
+            "share_distribution": m_share_dist,
+            "referral_to_completed_reading": m_referral,
+            "paid_checkout_conversion": m_paid_conv
         },
         "operational_economics": {
             "estimated_cv_cost_per_reading_usd": 0.00,

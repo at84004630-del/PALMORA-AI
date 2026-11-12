@@ -95,15 +95,18 @@ interface MountDefinition {
   radius: number;
   defaultElev: number;
   symbolic: string;
+  roiXRight: number;
+  roiXLeft: number;
+  roiY: number;
 }
 
 const PALM_MOUNTS: MountDefinition[] = [
-  { key: 'jupiter', name: 'Mount of Jupiter', defaultX: 0.29, leftX: 0.71, y: 0.36, radius: 26, defaultElev: 0.52, symbolic: 'Leadership, ambition, and social expansion' },
-  { key: 'saturn', name: 'Mount of Saturn', defaultX: 0.45, leftX: 0.55, y: 0.33, radius: 24, defaultElev: 0.48, symbolic: 'Discipline, contemplative depth, and ethical grounding' },
-  { key: 'apollo', name: 'Mount of Apollo (Sun)', defaultX: 0.61, leftX: 0.39, y: 0.35, radius: 25, defaultElev: 0.50, symbolic: 'Creativity, aesthetic appreciation, and charismatic warmth' },
-  { key: 'mercury', name: 'Mount of Mercury', defaultX: 0.75, leftX: 0.25, y: 0.39, radius: 24, defaultElev: 0.49, symbolic: 'Commercial discernment, quick intellect, and clear speech' },
-  { key: 'venus', name: 'Mount of Venus (Thenar)', defaultX: 0.30, leftX: 0.70, y: 0.63, radius: 46, defaultElev: 0.62, symbolic: 'Constitutional vitality, warmth, empathy, and sensory zest' },
-  { key: 'moon', name: 'Mount of Moon (Hypothenar)', defaultX: 0.75, leftX: 0.25, y: 0.67, radius: 38, defaultElev: 0.54, symbolic: 'Intuition, imagination, receptive contemplation, and travel' },
+  { key: 'jupiter', name: 'Mount of Jupiter', defaultX: 0.29, leftX: 0.71, y: 0.38, radius: 26, defaultElev: 0.52, symbolic: 'Leadership, ambition, and social expansion', roiXRight: 0.24, roiXLeft: 0.76, roiY: 0.18 },
+  { key: 'saturn', name: 'Mount of Saturn', defaultX: 0.45, leftX: 0.55, y: 0.36, radius: 24, defaultElev: 0.48, symbolic: 'Discipline, contemplative depth, and ethical grounding', roiXRight: 0.42, roiXLeft: 0.58, roiY: 0.16 },
+  { key: 'apollo', name: 'Mount of Apollo (Sun)', defaultX: 0.61, leftX: 0.39, y: 0.37, radius: 25, defaultElev: 0.50, symbolic: 'Creativity, aesthetic appreciation, and charismatic warmth', roiXRight: 0.60, roiXLeft: 0.40, roiY: 0.18 },
+  { key: 'mercury', name: 'Mount of Mercury', defaultX: 0.75, leftX: 0.25, y: 0.40, radius: 24, defaultElev: 0.49, symbolic: 'Commercial discernment, quick intellect, and clear speech', roiXRight: 0.80, roiXLeft: 0.20, roiY: 0.22 },
+  { key: 'venus', name: 'Mount of Venus (Thenar)', defaultX: 0.30, leftX: 0.70, y: 0.63, radius: 46, defaultElev: 0.62, symbolic: 'Constitutional vitality, warmth, empathy, and sensory zest', roiXRight: 0.28, roiXLeft: 0.72, roiY: 0.58 },
+  { key: 'moon', name: 'Mount of Moon (Hypothenar)', defaultX: 0.75, leftX: 0.25, y: 0.67, radius: 38, defaultElev: 0.54, symbolic: 'Intuition, imagination, receptive contemplation, and travel', roiXRight: 0.76, roiXLeft: 0.24, roiY: 0.66 },
 ];
 
 function interpolatePolylineAtFraction(path: Point2D[], fraction: number): Point2D | null {
@@ -224,15 +227,16 @@ export default function PalmOverlayCanvas({
         ctx.restore();
       }
 
-      // Helper function to draw normalized polyline
+      // Helper function to draw normalized polyline or parametric cubic Bézier curve
       const drawCrease = (
         path: Point2D[],
         color: string,
         glowColor: string,
         lineWidth: number = 3.5,
-        isDashed: boolean = false
+        isDashed: boolean = false,
+        bezierPoints?: Point2D[] | null
       ) => {
-        if (!path || path.length < 2) return;
+        if ((!path || path.length < 2) && (!bezierPoints || bezierPoints.length < 4)) return;
 
         ctx.save();
         if (showGlow) {
@@ -251,25 +255,55 @@ export default function PalmOverlayCanvas({
         }
 
         ctx.beginPath();
-        const startX = path[0].x * displayWidth;
-        const startY = path[0].y * displayHeight;
-        ctx.moveTo(startX, startY);
+        if (path && path.length >= 2) {
+          // Render smooth cardinal curve through real biological ridge vertices
+          const startX = path[0].x * displayWidth;
+          const startY = path[0].y * displayHeight;
+          ctx.moveTo(startX, startY);
 
-        for (let i = 1; i < path.length; i++) {
-          const px = path[i].x * displayWidth;
-          const py = path[i].y * displayHeight;
-          ctx.lineTo(px, py);
+          if (path.length === 2) {
+            ctx.lineTo(path[1].x * displayWidth, path[1].y * displayHeight);
+          } else {
+            for (let i = 1; i < path.length - 1; i++) {
+              const xc = ((path[i].x + path[i + 1].x) / 2) * displayWidth;
+              const yc = ((path[i].y + path[i + 1].y) / 2) * displayHeight;
+              ctx.quadraticCurveTo(path[i].x * displayWidth, path[i].y * displayHeight, xc, yc);
+            }
+            const last = path[path.length - 1];
+            ctx.lineTo(last.x * displayWidth, last.y * displayHeight);
+          }
+          ctx.stroke();
+
+          // Draw endpoint anchor dots
+          ctx.fillStyle = '#FFFFFF';
+          ctx.beginPath();
+          ctx.arc(startX, startY, isDashed ? 3 : 4, 0, Math.PI * 2);
+          const endX = path[path.length - 1].x * displayWidth;
+          const endY = path[path.length - 1].y * displayHeight;
+          ctx.arc(endX, endY, isDashed ? 3 : 4, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (bezierPoints && bezierPoints.length === 4) {
+          // Parametric cubic Bézier curve fallback
+          const p0x = bezierPoints[0].x * displayWidth;
+          const p0y = bezierPoints[0].y * displayHeight;
+          const p1x = bezierPoints[1].x * displayWidth;
+          const p1y = bezierPoints[1].y * displayHeight;
+          const p2x = bezierPoints[2].x * displayWidth;
+          const p2y = bezierPoints[2].y * displayHeight;
+          const p3x = bezierPoints[3].x * displayWidth;
+          const p3y = bezierPoints[3].y * displayHeight;
+
+          ctx.moveTo(p0x, p0y);
+          ctx.bezierCurveTo(p1x, p1y, p2x, p2y, p3x, p3y);
+          ctx.stroke();
+
+          // Draw endpoint anchor dots
+          ctx.fillStyle = '#FFFFFF';
+          ctx.beginPath();
+          ctx.arc(p0x, p0y, isDashed ? 3 : 4, 0, Math.PI * 2);
+          ctx.arc(p3x, p3y, isDashed ? 3 : 4, 0, Math.PI * 2);
+          ctx.fill();
         }
-        ctx.stroke();
-
-        // Draw endpoint dots
-        ctx.fillStyle = '#FFFFFF';
-        ctx.beginPath();
-        ctx.arc(startX, startY, isDashed ? 3 : 4, 0, Math.PI * 2);
-        const endX = path[path.length - 1].x * displayWidth;
-        const endY = path[path.length - 1].y * displayHeight;
-        ctx.arc(endX, endY, isDashed ? 3 : 4, 0, Math.PI * 2);
-        ctx.fill();
 
         ctx.restore();
       };
@@ -304,20 +338,50 @@ export default function PalmOverlayCanvas({
         const rH = rYmax - rYmin;
 
         PALM_MOUNTS.forEach((m) => {
-          const rawX = isLeft ? m.leftX : m.defaultX;
-          const normX = (hasRoi && rW > 0.25) ? (rXmin + rawX * rW) : rawX;
-          const normY = (hasRoi && rH > 0.25) ? (rYmin + m.y * rH) : m.y;
+          const mountData = (features.mount_topography as any)?.[m.key];
+          let normX: number;
+          let normY: number;
+
+          if (hasRoi && rW > 0.15 && rH > 0.15) {
+            const fallbackRoiX = rXmin + (isLeft ? m.roiXLeft : m.roiXRight) * rW;
+            const fallbackRoiY = rYmin + m.roiY * rH;
+
+            if (mountData?.center && typeof mountData.center.x === 'number' && typeof mountData.center.y === 'number') {
+              // Clamp measured center strictly within palmar anatomical zones (beneath knuckle bases)
+              const minX = rXmin + 0.05 * rW;
+              const maxX = rXmax - 0.05 * rW;
+              let minY = rYmin + 0.10 * rH;
+              let maxY = rYmin + 0.32 * rH;
+              if (m.key === 'venus') {
+                minY = rYmin + 0.35 * rH;
+                maxY = rYmin + 0.82 * rH;
+              } else if (m.key === 'moon') {
+                minY = rYmin + 0.40 * rH;
+                maxY = rYmin + 0.88 * rH;
+              }
+              normX = Math.max(minX, Math.min(maxX, mountData.center.x));
+              normY = Math.max(minY, Math.min(maxY, mountData.center.y));
+            } else {
+              normX = fallbackRoiX;
+              normY = fallbackRoiY;
+            }
+          } else {
+            const rawX = isLeft ? m.leftX : m.defaultX;
+            normX = mountData?.center?.x ?? rawX;
+            normY = mountData?.center?.y ?? m.y;
+          }
+
           const mx = normX * displayWidth;
           const my = normY * displayHeight;
-          const mountData = (features.mount_topography as any)?.[m.key];
           const elevation: number = mountData?.relative_elevation ?? m.defaultElev;
           const prominence: string = mountData?.prominence ?? (elevation >= 0.6 ? 'developed' : 'moderate');
 
           ctx.save();
-          // Concentric contour halo
-          const outerR = m.radius * (0.8 + elevation * 0.45);
-          const midR = m.radius * (0.55 + elevation * 0.3);
-          const innerR = m.radius * (0.28 + elevation * 0.15);
+          // Concentric contour halo with dynamic anatomical radius
+          const baseRadius = mountData?.radius ? (mountData.radius * displayWidth) : m.radius;
+          const outerR = baseRadius * (0.8 + elevation * 0.45);
+          const midR = baseRadius * (0.55 + elevation * 0.3);
+          const innerR = baseRadius * (0.28 + elevation * 0.15);
 
           // Radial elevation gradient
           const radGrad = ctx.createRadialGradient(mx, my, 2, mx, my, outerR);
@@ -393,50 +457,54 @@ export default function PalmOverlayCanvas({
       }
 
       // 3. Draw Heart Line (Rose Red)
-      if (showHeart && features.heart_line?.path && features.heart_line.path.length >= 2 && features.heart_line.status !== 'not_detected') {
+      if (showHeart && ((features.heart_line?.path && features.heart_line.path.length >= 2) || (features.heart_line?.bezier_control_points && features.heart_line.bezier_control_points.length === 4)) && features.heart_line.status !== 'not_detected') {
         const isUncertain = features.heart_line.status === 'uncertain';
         drawCrease(
           features.heart_line.path,
           isUncertain ? 'rgba(244, 63, 94, 0.75)' : '#F43F5E',
           'rgba(244, 63, 94, 0.8)',
           isUncertain ? 2.5 : 3.5,
-          isUncertain
+          isUncertain,
+          features.heart_line.bezier_control_points
         );
       }
 
       // 4. Draw Head Line (Sky Cyan)
-      if (showHead && features.head_line?.path && features.head_line.path.length >= 2 && features.head_line.status !== 'not_detected') {
+      if (showHead && ((features.head_line?.path && features.head_line.path.length >= 2) || (features.head_line?.bezier_control_points && features.head_line.bezier_control_points.length === 4)) && features.head_line.status !== 'not_detected') {
         const isUncertain = features.head_line.status === 'uncertain';
         drawCrease(
           features.head_line.path,
           isUncertain ? 'rgba(56, 189, 248, 0.75)' : '#38BDF8',
           'rgba(56, 189, 248, 0.8)',
           isUncertain ? 2.5 : 3.5,
-          isUncertain
+          isUncertain,
+          features.head_line.bezier_control_points
         );
       }
 
       // 5. Draw Life Line (Emerald Green)
-      if (showLife && features.life_line?.path && features.life_line.path.length >= 2 && features.life_line.status !== 'not_detected') {
+      if (showLife && ((features.life_line?.path && features.life_line.path.length >= 2) || (features.life_line?.bezier_control_points && features.life_line.bezier_control_points.length === 4)) && features.life_line.status !== 'not_detected') {
         const isUncertain = features.life_line.status === 'uncertain';
         drawCrease(
           features.life_line.path,
           isUncertain ? 'rgba(52, 211, 153, 0.75)' : '#34D399',
           'rgba(52, 211, 153, 0.8)',
           isUncertain ? 2.5 : 3.5,
-          isUncertain
+          isUncertain,
+          features.life_line.bezier_control_points
         );
       }
 
       // 6. Draw Fate Line (Amethyst Violet)
-      if (showFate && features.fate_line?.path && features.fate_line.path.length >= 2 && features.fate_line.status !== 'not_detected') {
+      if (showFate && ((features.fate_line?.path && features.fate_line.path.length >= 2) || (features.fate_line?.bezier_control_points && features.fate_line.bezier_control_points.length === 4)) && features.fate_line.status !== 'not_detected') {
         const isUncertain = features.fate_line.status === 'uncertain';
         drawCrease(
           features.fate_line.path,
           isUncertain ? 'rgba(192, 132, 252, 0.75)' : '#C084FC',
           'rgba(192, 132, 252, 0.8)',
           isUncertain ? 2.5 : 3.5,
-          isUncertain
+          isUncertain,
+          features.fate_line.bezier_control_points
         );
       }
 
@@ -911,9 +979,11 @@ export default function PalmOverlayCanvas({
               <div className="bg-[#070913]/60 p-3 rounded-xl border border-gray-800/80">
                 <span className="text-gray-400 block mb-1">Line Trace Clarity Index</span>
                 <span className="text-[#C8AA6E] font-mono font-medium text-sm">
-                  {activeFeatureData.confidence !== null ? activeFeatureData.confidence : 'Not Calibrated'}
+                  {activeFeatureData.confidence !== null && activeFeatureData.confidence !== undefined
+                    ? `${Math.round(activeFeatureData.confidence * 100)}% Certainty`
+                    : 'Not Calibrated'}
                 </span>
-                <span className="text-[10px] text-gray-400 block mt-0.5">Geometric visibility score — not predictive accuracy</span>
+                <span className="text-[10px] text-gray-400 block mt-0.5">Biometric valley contrast & continuity</span>
               </div>
             </div>
           ) : (

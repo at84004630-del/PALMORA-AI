@@ -69,10 +69,56 @@ jobs:
       - name: Run Frontend Tests
         run: npm test
 
+  e2e-test:
+    name: Headless E2E Browser Regression Tests (Playwright)
+    runs-on: ubuntu-latest
+    needs: [frontend-test]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Monorepo Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile Shared Types
+        run: pnpm --filter @palmora/shared-types build
+
+      - name: Install Playwright Browsers with OS Dependencies
+        run: pnpm --filter @palmora/web exec playwright install --with-deps chromium
+
+      - name: Build Next.js Production Web Bundle
+        run: npm run build:web
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+
+      - name: Run Headless Playwright Regression Flow (/scan -> /analysis -> /reading)
+        run: pnpm --filter @palmora/web run test:e2e
+        env:
+          CI: 'true'
+
+      - name: Upload Playwright Test Report on Failure
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && failure() }}
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 14
+
   docker-build:
     name: Container Build Verification
     runs-on: ubuntu-latest
-    needs: [backend-test, frontend-test]
+    needs: [backend-test, frontend-test, e2e-test]
 
     steps:
       - name: Checkout Code

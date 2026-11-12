@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     LLM_PROVIDER: str = "auto"  # 'gemini', 'openai', 'offline'
-    LLM_MODEL_NAME: str = "gemini-2.0-flash"
+    LLM_MODEL_NAME: str = "gemini-2.5-flash"
 
     # Supabase Configuration
     SUPABASE_URL: str = ""

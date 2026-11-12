@@ -37,10 +37,12 @@ import type {
   MindfulnessHabit,
   CreaseJournalEntry,
   HabitAlignmentSummary,
+  TelemetryData,
 } from '@palmora/shared-types';
 import { SUPPORTED_LANGUAGES } from '@palmora/shared-types';
 
 export { SUPPORTED_LANGUAGES };
+export type { TelemetryData };
 
 export type {
   Point2D,
@@ -85,21 +87,43 @@ export type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL !== undefined ? process.env.NEXT_PUBLIC_API_URL : 'http://localhost:8000';
 
+export function formatApiErrorMessage(error: unknown): string {
+  if (!error) return 'An unexpected error occurred. Please try again.';
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('net::ERR_')) {
+    return 'Unable to reach the Palmora analysis server. Please verify your internet connection or check if the server is running.';
+  }
+  if (msg.includes('429') || msg.toLowerCase().includes('rate limit')) {
+    return 'Analysis request limit reached. Please wait a moment before analyzing another palm.';
+  }
+  if (msg.includes('413')) {
+    return 'The photograph exceeds our size limit. Please upload an image under 10MB.';
+  }
+  if (msg.includes('415')) {
+    return 'Unsupported image format. Please capture or upload a JPEG, PNG, or WebP photo.';
+  }
+  return msg;
+}
+
 export async function createGuestSession(): Promise<GuestSessionResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/account/guest-session`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to establish secure guest session with server');
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/account/guest-session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to establish secure guest session with server');
+    }
+    const data: GuestSessionResponse = await res.json();
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('palmora_guest_session_token', data.session_token);
+      localStorage.setItem('palmora_session_id', data.user_id);
+    }
+    return data;
+  } catch (err: any) {
+    throw new Error(formatApiErrorMessage(err));
   }
-  const data: GuestSessionResponse = await res.json();
-  if (typeof window !== 'undefined') {
-    localStorage.setItem('palmora_guest_session_token', data.session_token);
-    localStorage.setItem('palmora_session_id', data.user_id);
-  }
-  return data;
 }
 
 export function clearClientSessionToken(): void {
@@ -191,46 +215,54 @@ async function getAuthHeaders(extraHeaders: Record<string, string> = {}): Promis
 }
 
 export async function validatePalmImage(file: File): Promise<ImageQualityMetrics> {
-  const formData = new FormData();
-  formData.append('file', file);
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
 
-  const res = await fetch(`${API_BASE}/api/v1/palm/validate`, {
-    method: 'POST',
-    body: formData,
-  });
+    const res = await fetch(`${API_BASE}/api/v1/palm/validate`, {
+      method: 'POST',
+      body: formData,
+    });
 
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to validate palm image');
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to validate palm image');
+    }
+
+    return res.json();
+  } catch (err: any) {
+    throw new Error(formatApiErrorMessage(err));
   }
-
-  return res.json();
 }
 
 export async function analyzePalmImage(file: File): Promise<PalmAnalysisResult> {
-  const send = async () => {
-    const formData = new FormData();
-    formData.append('file', file);
-    const headers = await getRequiredAuthHeaders();
-    return fetch(`${API_BASE}/api/v1/palm/analyze`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-  };
+  try {
+    const send = async () => {
+      const formData = new FormData();
+      formData.append('file', file);
+      const headers = await getRequiredAuthHeaders();
+      return fetch(`${API_BASE}/api/v1/palm/analyze`, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+    };
 
-  let res = await send();
-  if (res.status === 401) {
-    clearClientSessionToken();
-    res = await send();
+    let res = await send();
+    if (res.status === 401) {
+      clearClientSessionToken();
+      res = await send();
+    }
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to analyze palm creases');
+    }
+
+    return res.json();
+  } catch (err: any) {
+    throw new Error(formatApiErrorMessage(err));
   }
-
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to analyze palm creases');
-  }
-
-  return res.json();
 }
 
 export async function generateReading(req: GenerateReadingRequest): Promise<PalmReadingReport> {
@@ -602,7 +634,7 @@ export async function createCheckoutSession(params: {
   return res.json();
 }
 
-export async function getAnalyticsMetrics(): Promise<any> {
+export async function getAnalyticsMetrics(): Promise<TelemetryData> {
   const res = await fetch(`${API_BASE}/api/v1/analytics/metrics`);
   if (!res.ok) {
     throw new Error('Failed to load telemetry metrics');

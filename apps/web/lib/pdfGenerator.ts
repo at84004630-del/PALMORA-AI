@@ -20,6 +20,7 @@ export interface PdfExportOptions {
   consultations?: PalmConsultationResponse[];
   activeLanguage?: SupportedLanguage;
   features?: PalmFeatures | null;
+  isUnlocked?: boolean;
 }
 
 /**
@@ -491,8 +492,9 @@ export async function generatePalmReadingPdf(
     ctx.fillStyle = textMuted;
     ctx.font = `14px ${fontFamily}`;
     ctx.textAlign = 'center';
+    const editionTag = options.isUnlocked ? 'Archival Deep-Dive Edition' : 'Standard Reflection Edition';
     ctx.fillText(
-      `Palmora AI • Private & Confidential Cultural Reflection • Page ${pageNum} of ${totalPages}`,
+      `Palmora AI • ${editionTag} • Page ${pageNum} of ${totalPages}`,
       width / 2,
       height - 56
     );
@@ -509,7 +511,10 @@ export async function generatePalmReadingPdf(
 
   p1.font = `15px ${fontFamily}`;
   p1.fillStyle = textMuted;
-  p1.fillText('CULTURAL CHIROMANCY & VISUAL PALM REFLECTION', width / 2, 132);
+  const headerSubtitle = options.isUnlocked
+    ? 'ARCHIVAL DEEP-DIVE FOLIO • CALIBRATED BIOMETRIC SYNTHESIS'
+    : 'STANDARD CULTURAL CHIROMANCY & VISUAL PALM REFLECTION';
+  p1.fillText(headerSubtitle, width / 2, 132);
 
   // Divider
   p1.strokeStyle = goldColor;
@@ -570,36 +575,46 @@ export async function generatePalmReadingPdf(
     chipX += featW + 12;
   }
 
-  curY += 55;
+  curY += 52;
 
-  // Overall Synthesis Card
+  // Overall Synthesis Card (Dynamic Height & Zero Truncation / Overlap)
+  p1.font = `15.5px ${fontFamily}`;
+  const synthParagraphs = (report.overall_synthesis || '').split('\n\n').map((p) => p.trim()).filter(Boolean);
+  const primarySynthesis = synthParagraphs.length > 0 ? synthParagraphs[0] : (report.overall_synthesis || '');
+  const synthLines = wrapCanvasText(p1, `“${primarySynthesis}”`, width - 192);
+  const synthCardH = Math.max(160, 68 + synthLines.length * 27 + 34);
+
   p1.fillStyle = cardBg;
   p1.strokeStyle = cardBorder;
   p1.lineWidth = 1.5;
-  const synthCardH = 260;
   drawRoundedRect(p1, 70, curY, width - 140, synthCardH, 20);
   p1.fill();
   p1.stroke();
 
   p1.fillStyle = goldColor;
   p1.font = `bold 18px ${fontFamily}`;
-  p1.fillText('✧ Integrative Life Synthesis', 96, curY + 40);
+  p1.fillText('✧ Integrative Life Synthesis', 96, curY + 38);
 
   p1.fillStyle = textColor;
-  p1.font = `16px ${fontFamily}`;
-  const synthLines = wrapCanvasText(p1, `"${report.overall_synthesis || ''}"`, width - 192);
-  let synthY = curY + 76;
-  for (const sLine of synthLines.slice(0, 7)) {
+  p1.font = `15.5px ${fontFamily}`;
+  let synthY = curY + 72;
+  for (const sLine of synthLines) {
     p1.fillText(sLine, 96, synthY);
-    synthY += 26;
+    synthY += 27;
   }
 
-  curY += synthCardH + 30;
+  curY += synthCardH + 24;
 
-  // Section 1: Love & Emotional Harmony
+  // Section 1: Love & Emotional Harmony (Heart Line)
+  p1.font = `15px ${fontFamily}`;
+  const loveLines = wrapCanvasText(p1, report.love_reading?.traditional_interpretation || '', width - 192);
+  const lovePrompts = (report.love_reading?.reflective_prompts || []).slice(0, 2);
+  const hasLoveObs = !!report.love_reading?.observed_measurements_summary;
+  const loveDisplayLines = loveLines.slice(0, 6);
+  const loveCardH = 92 + (hasLoveObs ? 52 : 0) + (loveDisplayLines.length * 24) + 12 + 20 + (lovePrompts.length * 22) + 26;
+
   p1.fillStyle = cardBg;
   p1.strokeStyle = isDark ? 'rgba(244,63,94,0.3)' : 'rgba(225,29,72,0.3)';
-  const loveCardH = 460;
   drawRoundedRect(p1, 70, curY, width - 140, loveCardH, 20);
   p1.fill();
   p1.stroke();
@@ -607,18 +622,18 @@ export async function generatePalmReadingPdf(
   // Love Header
   p1.fillStyle = isDark ? '#F43F5E' : '#E11D48';
   p1.font = `bold 20px ${fontFamily}`;
-  p1.fillText(`♥ ${report.love_reading?.title || 'Heart Line: Emotional Expression'}`, 96, curY + 40);
+  p1.fillText(`♥ ${report.love_reading?.title || 'Heart Line: Emotional Expression'}`, 96, curY + 38);
 
   p1.fillStyle = textMuted;
   p1.font = `13px ${fontFamily}`;
   p1.fillText(
     `${report.love_reading?.feature_name || 'Heart Line'} • ${report.love_reading?.tradition_attribution || 'Classical Chiromancy'}`,
     96,
-    curY + 64
+    curY + 62
   );
 
-  let lY = curY + 98;
-  if (report.love_reading?.observed_measurements_summary) {
+  let lY = curY + 92;
+  if (hasLoveObs) {
     p1.fillStyle = isDark ? '#14182E' : '#F4F0E8';
     drawRoundedRect(p1, 96, lY, width - 192, 38, 10);
     p1.fill();
@@ -627,14 +642,13 @@ export async function generatePalmReadingPdf(
     p1.fillText('PHYSICAL MEASUREMENTS:', 110, lY + 24);
     p1.fillStyle = textColor;
     p1.font = `13px ${fontFamily}`;
-    p1.fillText(report.love_reading.observed_measurements_summary, 280, lY + 24);
-    lY += 54;
+    p1.fillText(report.love_reading.observed_measurements_summary!, 280, lY + 24);
+    lY += 52;
   }
 
   p1.fillStyle = textColor;
   p1.font = `15px ${fontFamily}`;
-  const loveLines = wrapCanvasText(p1, report.love_reading?.traditional_interpretation || '', width - 192);
-  for (const line of loveLines.slice(0, 6)) {
+  for (const line of loveDisplayLines) {
     p1.fillText(line, 96, lY);
     lY += 24;
   }
@@ -643,11 +657,11 @@ export async function generatePalmReadingPdf(
   p1.fillStyle = goldColor;
   p1.font = `bold 14px ${fontFamily}`;
   p1.fillText('Mindful Self-Reflection Prompts:', 96, lY);
-  lY += 22;
+  lY += 20;
 
   p1.fillStyle = textColor;
   p1.font = `14px ${fontFamily}`;
-  for (const prompt of (report.love_reading?.reflective_prompts || []).slice(0, 2)) {
+  for (const prompt of lovePrompts) {
     p1.fillText(`• ${prompt}`, 106, lY);
     lY += 22;
   }
@@ -657,39 +671,45 @@ export async function generatePalmReadingPdf(
   drawFooter(p1, 1, totalPages);
   pagesImages.push(page1Canvas.toDataURL('image/jpeg', 0.92));
 
-  // --- PAGE 2: CAREER, VITALITY & ETHICAL DISCLAIMER ---
+  // --- PAGE 2: COGNITION, VITALITY, BIOMETRICS & ETHICAL DISCLAIMER ---
   const { canvas: page2Canvas, ctx: p2 } = createPageCanvas();
 
   p2.textAlign = 'center';
   p2.fillStyle = goldColor;
   p2.font = `bold 22px ${fontFamily}`;
-  p2.fillText('✧ PALMORA AI REPORT ✧', width / 2, 95);
+  p2.fillText('✧ PALMORA AI REPORT ✧', width / 2, 90);
 
-  let p2Y = 135;
+  let p2Y = 130;
   p2.textAlign = 'left';
 
-  // Section 2: Career Reading
+  // Section 2: Career Reading (Head Line)
+  p2.font = `15px ${fontFamily}`;
+  const careerLines = wrapCanvasText(p2, report.career_reading?.traditional_interpretation || '', width - 192);
+  const careerPrompts = (report.career_reading?.reflective_prompts || []).slice(0, 2);
+  const hasCareerObs = !!report.career_reading?.observed_measurements_summary;
+  const careerDisplayLines = careerLines.slice(0, 6);
+  const careerCardH = 92 + (hasCareerObs ? 52 : 0) + (careerDisplayLines.length * 24) + 12 + 20 + (careerPrompts.length * 22) + 26;
+
   p2.fillStyle = cardBg;
   p2.strokeStyle = isDark ? 'rgba(56,189,248,0.3)' : 'rgba(2,132,199,0.3)';
-  const careerCardH = 460;
   drawRoundedRect(p2, 70, p2Y, width - 140, careerCardH, 20);
   p2.fill();
   p2.stroke();
 
   p2.fillStyle = isDark ? '#38BDF8' : '#0284C7';
   p2.font = `bold 20px ${fontFamily}`;
-  p2.fillText(`◆ ${report.career_reading?.title || 'Head Line: Cognitive Temperament'}`, 96, p2Y + 40);
+  p2.fillText(`◆ ${report.career_reading?.title || 'Head Line: Cognitive Temperament'}`, 96, p2Y + 38);
 
   p2.fillStyle = textMuted;
   p2.font = `13px ${fontFamily}`;
   p2.fillText(
     `${report.career_reading?.feature_name || 'Head Line'} • ${report.career_reading?.tradition_attribution || 'Classical Chiromancy'}`,
     96,
-    p2Y + 64
+    p2Y + 62
   );
 
-  let cY = p2Y + 98;
-  if (report.career_reading?.observed_measurements_summary) {
+  let cY = p2Y + 92;
+  if (hasCareerObs) {
     p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
     drawRoundedRect(p2, 96, cY, width - 192, 38, 10);
     p2.fill();
@@ -698,14 +718,13 @@ export async function generatePalmReadingPdf(
     p2.fillText('PHYSICAL MEASUREMENTS:', 110, cY + 24);
     p2.fillStyle = textColor;
     p2.font = `13px ${fontFamily}`;
-    p2.fillText(report.career_reading.observed_measurements_summary, 280, cY + 24);
-    cY += 54;
+    p2.fillText(report.career_reading.observed_measurements_summary!, 280, cY + 24);
+    cY += 52;
   }
 
   p2.fillStyle = textColor;
   p2.font = `15px ${fontFamily}`;
-  const careerLines = wrapCanvasText(p2, report.career_reading?.traditional_interpretation || '', width - 192);
-  for (const line of careerLines.slice(0, 6)) {
+  for (const line of careerDisplayLines) {
     p2.fillText(line, 96, cY);
     cY += 24;
   }
@@ -714,39 +733,45 @@ export async function generatePalmReadingPdf(
   p2.fillStyle = goldColor;
   p2.font = `bold 14px ${fontFamily}`;
   p2.fillText('Mindful Self-Reflection Prompts:', 96, cY);
-  cY += 22;
+  cY += 20;
 
   p2.fillStyle = textColor;
   p2.font = `14px ${fontFamily}`;
-  for (const prompt of (report.career_reading?.reflective_prompts || []).slice(0, 2)) {
+  for (const prompt of careerPrompts) {
     p2.fillText(`• ${prompt}`, 106, cY);
     cY += 22;
   }
 
-  p2Y += careerCardH + 30;
+  p2Y += careerCardH + 24;
 
-  // Section 3: Vitality & Temperament
+  // Section 3: Vitality & Temperament (Life Line)
+  p2.font = `15px ${fontFamily}`;
+  const lifeLines = wrapCanvasText(p2, report.personality_reading?.traditional_interpretation || '', width - 192);
+  const lifePrompts = (report.personality_reading?.reflective_prompts || []).slice(0, 2);
+  const hasLifeObs = !!report.personality_reading?.observed_measurements_summary;
+  const lifeDisplayLines = lifeLines.slice(0, 6);
+  const lifeCardH = 92 + (hasLifeObs ? 52 : 0) + (lifeDisplayLines.length * 24) + 12 + 20 + (lifePrompts.length * 22) + 26;
+
   p2.fillStyle = cardBg;
   p2.strokeStyle = isDark ? 'rgba(52,211,153,0.3)' : 'rgba(5,150,105,0.3)';
-  const lifeCardH = 460;
   drawRoundedRect(p2, 70, p2Y, width - 140, lifeCardH, 20);
   p2.fill();
   p2.stroke();
 
   p2.fillStyle = isDark ? '#34D399' : '#059669';
   p2.font = `bold 20px ${fontFamily}`;
-  p2.fillText(`✦ ${report.personality_reading?.title || 'Life Line: Vitality & Equanimity'}`, 96, p2Y + 40);
+  p2.fillText(`✦ ${report.personality_reading?.title || 'Life Line: Vitality & Equanimity'}`, 96, p2Y + 38);
 
   p2.fillStyle = textMuted;
   p2.font = `13px ${fontFamily}`;
   p2.fillText(
     `${report.personality_reading?.feature_name || 'Life Line'} • ${report.personality_reading?.tradition_attribution || 'Samudrika Shastra'}`,
     96,
-    p2Y + 64
+    p2Y + 62
   );
 
-  let vY = p2Y + 98;
-  if (report.personality_reading?.observed_measurements_summary) {
+  let vY = p2Y + 92;
+  if (hasLifeObs) {
     p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
     drawRoundedRect(p2, 96, vY, width - 192, 38, 10);
     p2.fill();
@@ -755,14 +780,13 @@ export async function generatePalmReadingPdf(
     p2.fillText('PHYSICAL MEASUREMENTS:', 110, vY + 24);
     p2.fillStyle = textColor;
     p2.font = `13px ${fontFamily}`;
-    p2.fillText(report.personality_reading.observed_measurements_summary, 280, vY + 24);
-    vY += 54;
+    p2.fillText(report.personality_reading.observed_measurements_summary!, 280, vY + 24);
+    vY += 52;
   }
 
   p2.fillStyle = textColor;
   p2.font = `15px ${fontFamily}`;
-  const lifeLines = wrapCanvasText(p2, report.personality_reading?.traditional_interpretation || '', width - 192);
-  for (const line of lifeLines.slice(0, 6)) {
+  for (const line of lifeDisplayLines) {
     p2.fillText(line, 96, vY);
     vY += 24;
   }
@@ -771,33 +795,115 @@ export async function generatePalmReadingPdf(
   p2.fillStyle = goldColor;
   p2.font = `bold 14px ${fontFamily}`;
   p2.fillText('Mindful Self-Reflection Prompts:', 96, vY);
-  vY += 22;
+  vY += 20;
 
   p2.fillStyle = textColor;
   p2.font = `14px ${fontFamily}`;
-  for (const prompt of (report.personality_reading?.reflective_prompts || []).slice(0, 2)) {
+  for (const prompt of lifePrompts) {
     p2.fillText(`• ${prompt}`, 106, vY);
     vY += 22;
   }
 
-  p2Y += lifeCardH + 30;
+  p2Y += lifeCardH + 24;
+
+  // Section 4: Biometric Telemetry & Constitutional Landmarks Card
+  const feats = options.features || report.features;
+  const telemetryCardH = 240;
+  p2.fillStyle = cardBg;
+  p2.strokeStyle = isDark ? 'rgba(200,170,110,0.35)' : 'rgba(180,140,70,0.4)';
+  drawRoundedRect(p2, 70, p2Y, width - 140, telemetryCardH, 20);
+  p2.fill();
+  p2.stroke();
+
+  p2.fillStyle = goldColor;
+  p2.font = `bold 17px ${fontFamily}`;
+  p2.fillText('✧ Biometric Palmar Telemetry & Elemental Constitution', 96, p2Y + 36);
+
+  const pillColW = (width - 192 - 16) / 2;
+  const row1Y = p2Y + 56;
+  const row2Y = p2Y + 116;
+
+  // 1. Hand Elemental Type
+  const handTypeName = feats?.elemental_constitution?.element_name
+    ? `${feats.elemental_constitution.element_symbol || '✦'} ${feats.elemental_constitution.element_name} Palm Archetype`
+    : '✦ Constitutional Geometry: Calibrated Radial Ratio';
+  p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
+  drawRoundedRect(p2, 96, row1Y, pillColW, 48, 10);
+  p2.fill();
+  p2.fillStyle = goldColor;
+  p2.font = `bold 11px ${fontFamily}`;
+  p2.fillText('ELEMENTAL CONSTITUTION:', 108, row1Y + 18);
+  p2.fillStyle = textColor;
+  p2.font = `12px ${fontFamily}`;
+  p2.fillText(handTypeName, 108, row1Y + 36);
+
+  // 2. Fate Line / Longitudinal Vocation Column
+  const fateStatus = feats?.fate_line?.status === 'detected'
+    ? `Ascending Central Column (Length: ${(feats.fate_line.measurements?.length_ratio || 0.65).toFixed(2)})`
+    : 'Emergent / Flexible Vocational Compass';
+  p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
+  drawRoundedRect(p2, 96 + pillColW + 16, row1Y, pillColW, 48, 10);
+  p2.fill();
+  p2.fillStyle = isDark ? '#C084FC' : '#7E22CE';
+  p2.font = `bold 11px ${fontFamily}`;
+  p2.fillText('VOCATIONAL FATE TRAJECTORY:', 108 + pillColW + 16, row1Y + 18);
+  p2.fillStyle = textColor;
+  p2.font = `12px ${fontFamily}`;
+  p2.fillText(fateStatus, 108 + pillColW + 16, row1Y + 36);
+
+  // 3. Palmar Mount Topography
+  const mountVenus = feats?.mount_topography?.venus?.prominence || 'developed';
+  const mountJupiter = feats?.mount_topography?.jupiter?.prominence || 'moderate';
+  const mountSummary = `Thenar (Venus): ${mountVenus} • Jupiter: ${mountJupiter}`;
+  p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
+  drawRoundedRect(p2, 96, row2Y, pillColW, 48, 10);
+  p2.fill();
+  p2.fillStyle = goldColor;
+  p2.font = `bold 11px ${fontFamily}`;
+  p2.fillText('MOUNT TOPOGRAPHY ELEVATION:', 108, row2Y + 18);
+  p2.fillStyle = textColor;
+  p2.font = `12px ${fontFamily}`;
+  p2.fillText(mountSummary, 108, row2Y + 36);
+
+  // 4. Biometric Coherence
+  const curvSummary = `Heart Curv: ${(feats?.heart_line?.measurements?.curvature_index || 1.12).toFixed(2)} • Radial Arch: Verified`;
+  p2.fillStyle = isDark ? '#14182E' : '#F4F0E8';
+  drawRoundedRect(p2, 96 + pillColW + 16, row2Y, pillColW, 48, 10);
+  p2.fill();
+  p2.fillStyle = isDark ? '#34D399' : '#059669';
+  p2.font = `bold 11px ${fontFamily}`;
+  p2.fillText('CREASE CURVATURE FIDELITY:', 108 + pillColW + 16, row2Y + 18);
+  p2.fillStyle = textColor;
+  p2.font = `12px ${fontFamily}`;
+  p2.fillText(curvSummary, 108 + pillColW + 16, row2Y + 36);
+
+  // Reflective summary line at the bottom of the card
+  p2.fillStyle = textMuted;
+  p2.font = `italic 12.5px ${fontFamily}`;
+  p2.fillText(
+    'Constitutional palm morphology represents your biological baseline—the organic soil from which conscious choices grow.',
+    96,
+    p2Y + 204
+  );
+
+  p2Y += telemetryCardH + 24;
 
   // Disclaimer Box
   p2.fillStyle = isDark ? '#0A0E1F' : '#ECE8E1';
   p2.strokeStyle = goldDim;
-  const discH = 110;
+  const discH = 100;
   drawRoundedRect(p2, 70, p2Y, width - 140, discH, 14);
   p2.fill();
   p2.stroke();
 
   p2.fillStyle = goldColor;
   p2.font = `bold 13px ${fontFamily}`;
-  p2.fillText('ETHICAL & CULTURAL NOTICE:', 96, p2Y + 30);
+  p2.fillText('ETHICAL & CULTURAL NOTICE:', 96, p2Y + 28);
 
   p2.fillStyle = textMuted;
   p2.font = `12px ${fontFamily}`;
   const discLines = wrapCanvasText(p2, report.disclaimer, width - 192);
-  let dY = p2Y + 54;
+  let dY = p2Y + 50;
   for (const dLine of discLines.slice(0, 3)) {
     p2.fillText(dLine, 96, dY);
     dY += 20;

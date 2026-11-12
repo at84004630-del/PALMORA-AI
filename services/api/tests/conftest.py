@@ -62,3 +62,29 @@ def blurry_image_bytes() -> bytes:
 def invalid_bytes() -> bytes:
     """Non-image garbage bytes."""
     return b"not-a-valid-image-content-header"
+
+def pytest_configure(config):
+    """Globally configures deterministic offline test environment before test suite runs."""
+    import os
+    os.environ["GEMINI_API_KEY"] = ""
+    os.environ["OPENAI_API_KEY"] = ""
+    os.environ["LLM_PROVIDER"] = "offline"
+    os.environ["DATABASE_ENABLED"] = "false"
+    try:
+        from services.api.config import settings
+        settings.GEMINI_API_KEY = ""
+        settings.OPENAI_API_KEY = ""
+        settings.LLM_PROVIDER = "offline"
+        settings.DATABASE_ENABLED = False
+    except Exception:
+        pass
+
+@pytest.fixture(autouse=True)
+def offline_mode_for_unit_tests(monkeypatch):
+    """Enforces deterministic offline execution during unit tests by clearing LLM API keys and forcing offline provider."""
+    from services.api.config import settings
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "offline")
+    monkeypatch.setattr(settings, "DATABASE_ENABLED", False)
+

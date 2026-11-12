@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import heapq
 from typing import Dict, List, Tuple, Optional, Any
+from .hand_landmarker import detect_hand_landmarks, HandLandmarksData
 from ..schemas.palm import (
     PalmFeatures,
     CreaseFeature,
@@ -28,6 +29,7 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
     r_norm = img_float[:, :, 2] / rgb_sum
     g_norm = img_float[:, :, 1] / rgb_sum
     b_norm = img_float[:, :, 0] / rgb_sum
+    del img_float, rgb_sum
 
     # (a) Normalized chromaticity: skin cluster across tones with red dominance over blue
     mask_chrom = (
@@ -36,6 +38,7 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
         (r_norm >= g_norm * 0.90) &
         (r_norm >= b_norm + 0.010)
     )
+    del r_norm, g_norm, b_norm
 
     # (b) Broadened YCrCb gate with red saturation
     ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
@@ -48,6 +51,7 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
         (Cb >= 60) & (Cb <= 145) &
         (Cr >= Cb + 2)
     )
+    del ycrcb, Y, Cr, Cb
 
     # (c) HSV gate with minimum saturation to reject neutral gray/white/cream walls
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -59,6 +63,7 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
         (S >= 12) & (S <= 252) &
         (V >= 25)
     )
+    del hsv, H, S, V
 
     # (d) LAB gate: a* channel reflects oxyhemoglobin in human skin
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -70,6 +75,7 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
         (A_lab >= 128) & (A_lab <= 185) &
         (B_lab >= 118) & (B_lab <= 190)
     )
+    del lab, L_lab, A_lab, B_lab
 
     # Multi-space ensemble skin mask
     skin = (
@@ -135,7 +141,101 @@ def _refine_skin_mask(img: np.ndarray, quality: Optional[ImageQualityMetrics] = 
         cv2.drawContours(clean_mask, [largest_cnt], -1, 255, thickness=cv2.FILLED)
         mask = clean_mask
 
+    # Topological & Morphological Background Furniture Disconnection:
+    mask = _disconnect_background_furniture(mask, w, h)
+
     return mask
+
+
+def _disconnect_background_furniture(mask: np.ndarray, img_w: int, img_h: int) -> np.ndarray:
+    """
+    Topological & Morphological Background Disconnection:
+    Excises warm-toned background furniture (wooden closets, desks, doors) that share skin-like chrominance.
+    Uses Euclidean Distance Transform core seed separation and reticle-guided geodesic reconstruction.
+    """
+    dist_map = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    max_dist = float(np.max(dist_map)) if np.max(dist_map) > 0 else 0.0
+
+    if max_dist < 15.0:
+        return mask
+
+    # 1. Break thin bridges using distance thresholding (0.32 * max_dist dissolves isthmuses)
+    _, core_seeds = cv2.threshold(dist_map, 0.32 * max_dist, 255, cv2.THRESH_BINARY)
+    core_seeds = core_seeds.astype(np.uint8)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(core_seeds)
+    if num_labels <= 2:
+        return mask
+
+    best_label = 1
+    best_score = -1e9
+    img_cx = img_w * 0.50
+    img_cy = img_h * 0.55
+    frame_area = img_w * img_h
+
+    for l in range(1, num_labels):
+        stat = stats[l]
+        cx, cy = centroids[l]
+        area = stat[cv2.CC_STAT_AREA]
+        bw = stat[cv2.CC_STAT_WIDTH]
+        bh = stat[cv2.CC_STAT_HEIGHT]
+
+        # Reticle / Center affinity (palm is centered in the camera frame)
+        d_center = math.hypot(cx - img_cx, cy - img_cy)
+        norm_dist = d_center / math.hypot(img_w * 0.5, img_h * 0.5)
+
+        # Border proximity penalty (furniture/walls dock against image borders)
+        dist_to_left = cx - bw / 2.0
+        dist_to_right = img_w - (cx + bw / 2.0)
+        dist_to_top = cy - bh / 2.0
+        is_docked = (dist_to_left <= 8) or (dist_to_right <= 8) or (dist_to_top <= 8)
+        border_penalty = 5000.0 if is_docked else 0.0
+
+        # Compactness penalty (a palm core is roughly square/circular, not a tall wardrobe panel)
+        aspect = float(bw) / float(max(bh, 1))
+        aspect_penalty = abs(aspect - 1.0) * 200.0
+
+        # Finger mass presence directly above the palm core
+        slice_x1 = max(0, int(cx - bw * 0.6))
+        slice_x2 = min(img_w, int(cx + bw * 0.6))
+        slice_y1 = max(0, int(cy - bh * 1.5))
+        slice_y2 = max(0, int(cy - bh * 0.2))
+        finger_region = mask[slice_y1:slice_y2, slice_x1:slice_x2]
+        finger_bonus = min(np.sum(finger_region > 0), 2000) * 1.5
+
+        # Area scale: excessively massive objects (> 30% of frame) are background furniture/walls
+        area_ratio = float(area) / frame_area
+        if area_ratio > 0.30:
+            area_score = -2000.0
+        else:
+            area_score = min(math.sqrt(area) * 20.0, 1000.0)
+
+        score = area_score + finger_bonus - (norm_dist * 800.0) - aspect_penalty - border_penalty
+        if score > best_score:
+            best_score = score
+            best_label = l
+
+    # 2. Geodesic Reconstruction:
+    # Grow the selected palm core back out to capture fingers & thumb, bounded strictly by the original skin mask
+    hand_seed_mask = (labels == best_label).astype(np.uint8) * 255
+    k_geo = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    reconstructed = hand_seed_mask
+    for _ in range(40):
+        dilated = cv2.dilate(reconstructed, k_geo)
+        bounded = cv2.bitwise_and(dilated, mask)
+        if np.array_equal(bounded, reconstructed):
+            break
+        reconstructed = bounded
+
+    # 3. Fill holes in the isolated hand
+    cnts_rec, _ = cv2.findContours(reconstructed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cnts_rec:
+        largest_rec = max(cnts_rec, key=cv2.contourArea)
+        clean_rec = np.zeros_like(mask)
+        cv2.drawContours(clean_rec, [largest_rec], -1, 255, thickness=cv2.FILLED)
+        return clean_rec
+
+    return reconstructed
 
 
 def _detect_hand_anatomy(
@@ -174,7 +274,40 @@ def _detect_hand_anatomy(
                     palm_cy = float(sub_loc[1])
                     palm_radius = max(min(float(sub_val), float(min(img_w, img_h) * 0.45)), 35.0)
 
-    # Hand orientation angle & Thumb Cleft detection
+    # Hand orientation angle & Thumb Cleft detection with tilt-invariant projection (up to ±45°)
+    # Robust preliminary longitudinal hand axis pointing towards fingers:
+    # Uses vector from inscribed palm center to distal hand centroid (above palm_cy)
+    # to avoid the massive diagonal moment bias caused by extended thumb + forearm
+    prelim_angle_deg = 0.0
+    upper_mask = np.zeros_like(skin_mask)
+    upper_mask[:int(palm_cy), :] = skin_mask[:int(palm_cy), :]
+    M_up = cv2.moments(upper_mask)
+    if M_up["m00"] > 0:
+        up_cx = M_up["m10"] / M_up["m00"]
+        up_cy = M_up["m01"] / M_up["m00"]
+        dx = up_cx - palm_cx
+        dy = up_cy - palm_cy
+        if math.hypot(dx, dy) > 10.0:
+            ang = math.degrees(math.atan2(dx, -dy))
+            if abs(ang) <= 50.0:
+                prelim_angle_deg = ang
+
+    if prelim_angle_deg == 0.0:
+        M_cnt = cv2.moments(contour)
+        if M_cnt["m00"] > 0:
+            denom = M_cnt["mu02"] - M_cnt["mu20"]
+            if abs(denom) > 1e-3 or abs(M_cnt["mu11"]) > 1e-3:
+                raw_angle = 0.5 * math.degrees(math.atan2(-2.0 * M_cnt["mu11"], denom))
+                if abs(raw_angle) <= 50.0:
+                    prelim_angle_deg = raw_angle
+
+    # Unit vectors aligned with preliminary longitudinal hand axis (pointing towards fingers)
+    rad_p = math.radians(prelim_angle_deg)
+    u_distal_x = math.sin(rad_p)
+    u_distal_y = -math.cos(rad_p)
+    u_lateral_x = math.cos(rad_p)
+    u_lateral_y = math.sin(rad_p)
+
     peri = cv2.arcLength(contour, True)
     approx = cv2.approxPolyDP(contour, 0.003 * peri, True)
     hull_indices = cv2.convexHull(approx, returnPoints=False) if len(approx) >= 6 else None
@@ -195,21 +328,27 @@ def _detect_hand_anatomy(
                     far_pt = approx[f][0]
                     fx, fy = float(far_pt[0]), float(far_pt[1])
                     dist = math.hypot(fx - palm_cx, fy - palm_cy)
-                    if not (0.50 * palm_radius <= dist <= 2.3 * palm_radius):
+                    if not (0.50 * palm_radius <= dist <= 2.5 * palm_radius):
                         continue
 
-                    # Finger web valleys: strictly in the distal half above palm center
-                    if fy < palm_cy - 0.40 * palm_radius:
-                        finger_valleys.append((fx, fy, depth))
+                    # Project defect into hand coordinate frame (distal along fingers, lateral across width)
+                    vx = fx - palm_cx
+                    vy = fy - palm_cy
+                    distal_proj = vx * u_distal_x + vy * u_distal_y
+                    lateral_proj = vx * u_lateral_x + vy * u_lateral_y
+
+                    # Finger web valleys: strictly in the distal sector towards fingers
+                    if distal_proj > 0.35 * palm_radius:
+                        finger_valleys.append((fx, fy, depth, distal_proj, lateral_proj))
 
                     # Thumb cleft: lateral metacarpal zone (exclude wrist base at bottom)
-                    if (palm_cy - 0.40 * palm_radius <= fy <= palm_cy + 1.15 * palm_radius):
-                        thumb_candidates.append((fx, fy, depth))
+                    if (-0.40 * palm_radius <= distal_proj <= 1.15 * palm_radius) and (abs(lateral_proj) > 0.35 * palm_radius):
+                        thumb_candidates.append((fx, fy, depth, distal_proj, lateral_proj))
         except Exception:
             pass
 
-    # Estimate orientation angle from knuckle bar
-    deviation = 0.0
+    # Estimate orientation angle from knuckle bar or silhouette PCA
+    deviation = prelim_angle_deg
     if len(finger_valleys) >= 2:
         k_cx = float(np.median([v[0] for v in finger_valleys]))
         k_cy = float(np.median([v[1] for v in finger_valleys]))
@@ -219,10 +358,12 @@ def _detect_hand_anatomy(
             angle_deg = math.degrees(math.atan2(dx, -dy))
             if abs(angle_deg) <= 50.0:
                 deviation = angle_deg
-    elif len(contour) >= 5:
+    elif prelim_angle_deg == 0.0 and len(contour) >= 5:
         ellipse = cv2.fitEllipse(contour)
         angle = ellipse[2]
-        deviation = (angle - 180.0) if angle > 90.0 else angle
+        ell_dev = (angle - 180.0) if angle > 90.0 else angle
+        if abs(ell_dev) <= 50.0:
+            deviation = ell_dev
 
     # Determine hand side (anatomical palm-facing perspective):
     # - In palm-facing view, thumb on the left of palm center indicates a Right Palm.
@@ -230,14 +371,19 @@ def _detect_hand_anatomy(
     hand_side = "unknown"
     if thumb_candidates:
         best_thumb = max(thumb_candidates, key=lambda c: c[2])
-        if abs(best_thumb[0] - palm_cx) > 0.15 * palm_radius:
-            hand_side = "right" if best_thumb[0] < palm_cx else "left"
+        # best_thumb[4] is lateral_proj
+        if abs(best_thumb[4]) > 0.15 * palm_radius:
+            hand_side = "right" if best_thumb[4] < 0 else "left"
 
-    if hand_side == "unknown":
-        M = cv2.moments(contour)
-        if M["m00"] > 0:
-            cx_hand = M["m10"] / M["m00"]
-            hand_side = "left" if cx_hand > palm_cx else "right"
+    if hand_side == "unknown" and (finger_valleys or thumb_candidates):
+        if M_cnt["m00"] > 0:
+            cx_hand = M_cnt["m10"] / M_cnt["m00"]
+            cy_hand = M_cnt["m01"] / M_cnt["m00"]
+            vx_hand = cx_hand - palm_cx
+            vy_hand = cy_hand - palm_cy
+            lat_hand = vx_hand * u_lateral_x + vy_hand * u_lateral_y
+            if abs(lat_hand) > 0.08 * palm_radius:
+                hand_side = "left" if lat_hand > 0 else "right"
 
     return palm_cx, palm_cy, palm_radius, hand_side, float(deviation)
 
@@ -433,6 +579,147 @@ def _compute_polyline_orientation_pca(pts: np.ndarray) -> float:
     return round(float(angle_deg), 1)
 
 
+def _fit_cubic_bezier(pts: np.ndarray) -> np.ndarray:
+    """
+    Fits a 4-point parametric cubic Bézier curve [P0, P1, P2, P3] to an ordered polyline
+    via linear least-squares minimization of orthogonal Euclidean distance.
+    P0 is pinned to pts[0], P3 is pinned to pts[-1].
+    P1 and P2 are solved via the cubic Bernstein polynomial basis:
+      B(t) = (1-t)^3 P0 + 3(1-t)^2 t P1 + 3(1-t) t^2 P2 + t^3 P3
+    """
+    if len(pts) < 2:
+        return pts
+    if len(pts) == 2:
+        p0, p3 = pts[0], pts[1]
+        p1 = p0 + (p3 - p0) * (1.0 / 3.0)
+        p2 = p0 + (p3 - p0) * (2.0 / 3.0)
+        return np.array([p0, p1, p2, p3], dtype=np.float64)
+
+    p0 = pts[0].astype(np.float64)
+    p3 = pts[-1].astype(np.float64)
+
+    diffs = np.diff(pts, axis=0)
+    seg_lens = np.sqrt((diffs**2).sum(axis=1))
+    total_len = float(np.sum(seg_lens))
+    if total_len < 1e-4:
+        return np.array([p0, p0, p3, p3], dtype=np.float64)
+
+    t = np.zeros(len(pts), dtype=np.float64)
+    t[1:] = np.cumsum(seg_lens) / total_len
+
+    t_in = t[1:-1]
+    pts_in = pts[1:-1].astype(np.float64)
+    if len(t_in) == 0:
+        p1 = p0 + (p3 - p0) * (1.0 / 3.0)
+        p2 = p0 + (p3 - p0) * (2.0 / 3.0)
+        return np.array([p0, p1, p2, p3], dtype=np.float64)
+
+    b0 = (1.0 - t_in)**3
+    b1 = 3.0 * (1.0 - t_in)**2 * t_in
+    b2 = 3.0 * (1.0 - t_in) * t_in**2
+    b3 = t_in**3
+
+    A = np.column_stack([b1, b2])
+    bx = pts_in[:, 0] - b0 * p0[0] - b3 * p3[0]
+    by = pts_in[:, 1] - b0 * p0[1] - b3 * p3[1]
+
+    sol_x, _, _, _ = np.linalg.lstsq(A, bx, rcond=None)
+    sol_y, _, _, _ = np.linalg.lstsq(A, by, rcond=None)
+
+    p1 = np.array([sol_x[0], sol_y[0]], dtype=np.float64)
+    p2 = np.array([sol_x[1], sol_y[1]], dtype=np.float64)
+    return np.array([p0, p1, p2, p3], dtype=np.float64)
+
+
+def _profile_cross_sectional_valley(
+    gray_img: np.ndarray,
+    pts: np.ndarray,
+    swath_half_width: int = 7
+) -> dict:
+    """
+    Samples 1D photometric cross-sectional profiles orthogonal to the crease tangent
+    vector n(s) _|_ t(s) at each inner vertex.
+    Quantifies:
+      - valley_depth_px: Average contrast delta (crest baseline - valley trough) in luminance units
+      - relative_depth: Normalized valley depth [0.0 - 1.0]
+      - continuity_ratio: Proportion of sampled cross-sections exhibiting a confirmed depression
+      - detected_breaks: Count of contiguous gaps where the crease valley disappears (< 2.5px depth)
+      - detected_forks: Count of bimodal split profiles indicating crease branching
+    """
+    if gray_img is None or len(pts) < 3:
+        return {
+            "valley_depth_px": 0.0,
+            "relative_depth": 0.0,
+            "continuity_ratio": 1.0,
+            "detected_breaks": 0,
+            "detected_forks": 0
+        }
+
+    h_img, w_img = gray_img.shape[:2]
+    depths = []
+    bimodal_count = 0
+    consecutive_flat = 0
+    break_events = 0
+
+    for i in range(1, len(pts) - 1):
+        tangent = pts[i + 1] - pts[i - 1]
+        tan_norm = float(np.hypot(tangent[0], tangent[1]))
+        if tan_norm < 1e-3:
+            continue
+        unit_tan = tangent / tan_norm
+        unit_norm = np.array([-unit_tan[1], unit_tan[0]], dtype=np.float64)
+
+        p_center = pts[i]
+        offsets = np.arange(-swath_half_width, swath_half_width + 1)
+        sample_coords = p_center + np.outer(offsets, unit_norm)
+
+        xs = np.clip(np.round(sample_coords[:, 0]).astype(int), 0, w_img - 1)
+        ys = np.clip(np.round(sample_coords[:, 1]).astype(int), 0, h_img - 1)
+        profile = gray_img[ys, xs].astype(np.float64)
+
+        shoulder = (profile[0] + profile[-1]) / 2.0
+        mid_idx = swath_half_width
+        center_region = profile[max(0, mid_idx - 2):min(len(profile), mid_idx + 3)]
+        trough = float(np.min(center_region))
+
+        depth = max(0.0, shoulder - trough)
+        depths.append(depth)
+
+        if depth < 2.5:
+            consecutive_flat += 1
+            if consecutive_flat == 2:
+                break_events += 1
+        else:
+            consecutive_flat = 0
+
+        left_sub = profile[max(0, mid_idx - 4):mid_idx]
+        right_sub = profile[mid_idx + 1:min(len(profile), mid_idx + 5)]
+        if len(left_sub) >= 2 and len(right_sub) >= 2:
+            if (shoulder - float(np.min(left_sub)) > 4.0) and (shoulder - float(np.min(right_sub)) > 4.0):
+                bimodal_count += 1
+
+    if not depths:
+        return {
+            "valley_depth_px": 0.0,
+            "relative_depth": 0.0,
+            "continuity_ratio": 0.0,
+            "detected_breaks": 0,
+            "detected_forks": 0
+        }
+
+    avg_depth = float(np.mean(depths))
+    active_pts = sum(1 for d in depths if d >= 3.0)
+    continuity = round(float(active_pts / max(len(depths), 1)), 2)
+    rel_depth = round(min(1.0, float(avg_depth / 35.0)), 2)
+
+    return {
+        "valley_depth_px": round(avg_depth, 1),
+        "relative_depth": rel_depth,
+        "continuity_ratio": continuity,
+        "detected_breaks": break_events,
+        "detected_forks": bimodal_count
+    }
+
 
 def _link_collinear_segments_tangential(
     segments: list,
@@ -608,13 +895,13 @@ def _bridge_heart_zone_gap_min_cost(
 
         m_dx = float(np.ptp(merged_pts[:, 0]))
         m_dy = float(np.ptp(merged_pts[:, 1]))
-        if m_dy > m_dx * 0.85:
+        if m_dy > m_dx * 1.35:
             continue
 
         diffs = np.diff(merged_pts, axis=0)
         tot_len = float(np.sum(np.sqrt((diffs**2).sum(axis=1))))
         chord = float(math.hypot(merged_pts[-1, 0] - merged_pts[0, 0], merged_pts[-1, 1] - merged_pts[0, 1]))
-        if tot_len / max(chord, 1.0) > 1.85:
+        if tot_len / max(chord, 1.0) > 2.20:
             continue
 
         total_cost = dist[ty, tx]
@@ -656,7 +943,7 @@ def _extract_creases_hybrid_sota(
     L_clahe = clahe.apply(L_smooth)
 
     # 2. Multi-Scale Directional Morphological Black-Hat Filtering
-    bhat_combined = np.zeros_like(L_clahe, dtype=np.float32)
+    bhat_combined = np.zeros(L_clahe.shape, dtype=np.uint8)
     angles = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165]
     scales = [
         max(7, int(palm_radius * 0.10)),
@@ -673,13 +960,13 @@ def _extract_creases_hybrid_sota(
             line_k = np.zeros((k_size, k_size), dtype=np.uint8)
             cv2.line(line_k, (k_size // 2 - dx, k_size // 2 - dy), (k_size // 2 + dx, k_size // 2 + dy), 1, thickness=1)
             b1 = cv2.morphologyEx(L_clahe, cv2.MORPH_BLACKHAT, line_k)
-            bhat_combined = np.maximum(bhat_combined, b1.astype(np.float32))
+            np.maximum(bhat_combined, b1, out=bhat_combined)
 
             if s >= scales[1]:
                 line_k2 = np.zeros((k_size, k_size), dtype=np.uint8)
                 cv2.line(line_k2, (k_size // 2 - dx, k_size // 2 - dy), (k_size // 2 + dx, k_size // 2 + dy), 1, thickness=2)
                 b2 = cv2.morphologyEx(L_clahe, cv2.MORPH_BLACKHAT, line_k2)
-                bhat_combined = np.maximum(bhat_combined, b2.astype(np.float32))
+                np.maximum(bhat_combined, b2, out=bhat_combined)
 
     # 3. Hessian Valley / Tubeness Response Filter
     sigma = max(1.6, palm_radius * 0.025)
@@ -692,30 +979,38 @@ def _extract_creases_hybrid_sota(
     Ixx = cv2.Sobel(Ix, cv2.CV_32F, 1, 0, ksize=sobel_k)
     Ixy = cv2.Sobel(Ix, cv2.CV_32F, 0, 1, ksize=sobel_k)
     Iyy = cv2.Sobel(Iy, cv2.CV_32F, 0, 1, ksize=sobel_k)
+    del Ix, Iy, blurred
 
     trace = Ixx + Iyy
     det = Ixx * Iyy - Ixy**2
+    del Ixx, Ixy, Iyy
     disc = np.maximum(0.0, trace**2 - 4 * det)
+    del det
     sqrt_disc = np.sqrt(disc)
+    del disc
     lambda2 = (trace + sqrt_disc) * 0.5  # Max principal curvature
+    del trace, sqrt_disc
 
     valleys = np.maximum(0.0, lambda2)
+    del lambda2
     v_max = np.percentile(valleys[valleys > 0], 98.0) if np.any(valleys > 0) else 1.0
     hessian_resp = np.clip((valleys / max(v_max, 1e-4)) * 255.0, 0, 255).astype(np.float32)
+    del valleys
 
     # 4. Fusion of Black-Hat and Hessian Valley Responses
-    fused_creases = 0.65 * bhat_combined + 0.35 * hessian_resp
+    fused_creases = 0.65 * bhat_combined.astype(np.float32) + 0.35 * hessian_resp
+    del bhat_combined, hessian_resp
 
-    # 5. Anatomical Palmar Masking (strictly confines analysis to palm metacarpus)
+    # 5. Anatomical Palmar Masking (preserves full ulnar and radial margins)
+    y_mcp = int(max(0, palm_cy - 1.15 * palm_radius))
+    y_wrist = int(min(h - 1, palm_cy + 1.18 * palm_radius))
+    x_radial = int(max(0, palm_cx - 1.35 * palm_radius))
+    x_ulnar = int(min(w - 1, palm_cx + 1.35 * palm_radius))
+
     palmar_envelope = np.zeros((h, w), dtype=np.uint8)
-    cv2.ellipse(
-        palmar_envelope,
-        (int(palm_cx), int(palm_cy)),
-        (int(round(1.25 * palm_radius)), int(round(1.10 * palm_radius))),
-        0, 0, 360, 255, -1
-    )
+    palmar_envelope[y_mcp:y_wrist, x_radial:x_ulnar] = 255
     palmar_mask = cv2.bitwise_and(work_mask, palmar_envelope)
-    palmar_mask = cv2.erode(palmar_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    palmar_mask = cv2.erode(palmar_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
 
     crease_map = cv2.bitwise_and(
         fused_creases.astype(np.uint8),
@@ -745,6 +1040,7 @@ def analyze_palm_creases(
         (palm_features, hand_side, roi_box)
     """
     h, w = img.shape[:2]
+    gray_work = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
 
     # If no hand is detected and image is strictly unusable, return explicit honest un-detected features
     if not quality.hand_detected and not quality.is_usable:
@@ -781,8 +1077,32 @@ def analyze_palm_creases(
 
     hand_cnt = max(contours, key=cv2.contourArea)
 
-    # 2. Inscribed Palm Anatomy & Orientation
-    palm_cx, palm_cy, palm_radius, hand_side, rectify_angle = _detect_hand_anatomy(hand_cnt, mask, w, h)
+    # 2. Hand Landmark Detection (MediaPipe HandMesh with fallback to contour EDT)
+    lms_data: Optional[HandLandmarksData] = detect_hand_landmarks(img)
+    if lms_data is not None:
+        palm_cx, palm_cy = lms_data.palm_center_px
+        palm_radius = lms_data.palm_radius_px
+        hand_side = lms_data.handedness
+        rectify_angle = lms_data.hand_orientation_deg
+    else:
+        palm_cx, palm_cy, palm_radius, hand_side, rectify_angle = _detect_hand_anatomy(hand_cnt, mask, w, h)
+
+    # Anatomical Integrity Safeguard:
+    # If hand anatomy is unknown and the contour is not a macro palm, abort feature extraction
+    # to prevent fabricating hallucinated crease paths on faces, room objects, or clothing.
+    cnt_ratio = float(cv2.contourArea(hand_cnt) / (w * h))
+    if hand_side == "unknown" and cnt_ratio < 0.65:
+        return analyze_palm_creases(
+            img,
+            ImageQualityMetrics(
+                **{
+                    **quality.model_dump(),
+                    "hand_detected": False,
+                    "is_usable": False,
+                    "issues": list(set(quality.issues + ["Hand anatomy could not be verified. Please present an open palm."]))
+                }
+            )
+        )
 
     # Anatomical Palm ROI Box (isolates palm disc/quadrilateral, strictly excluding fingers and wrist)
     corners_norm = [
@@ -871,45 +1191,46 @@ def analyze_palm_creases(
         l = seg['arc_length']
         max_ry = float(np.max(seg['path'][:, 1] - palm_cy) / float(palm_radius))
 
-        # (a) Heart Line: upper transverse zone (-0.95 to -0.30), dx >= dy * 0.65
-        # Strictly confined to distal sub-finger region; penalized below ry = -0.30
+        # (a) Heart Line: upper transverse zone (-0.95 to -0.32), dx >= dy * 0.45
+        # Confined strictly to distal sub-finger region; prevents dipping into mid-palm
         s_heart = 0.0
-        if -0.95 <= ry <= -0.30 and dx >= dy * 0.65:
+        if -0.95 <= ry <= -0.32 and dx >= dy * 0.45:
             z_score = max(0.0, 1.0 - abs(ry - (-0.55)) / 0.35)
-            t_score = min(1.0, dx / max(dy * 0.8, 1.0))
+            t_score = min(1.0, dx / max(dy * 0.65, 1.0))
             l_score = min(1.0, l / (0.45 * float(palm_radius)))
             u_boost = 1.15 if u >= -0.20 else 0.85
             s_heart = (0.40 * z_score + 0.35 * t_score + 0.25 * l_score) * u_boost
 
-        # (b) Head Line: mid transverse zone (-0.38 to +0.18), central/radial palm, wide dx
-        # Spans across mid-palm from radial margin towards ulnar/moon zone (strictly transverse)
+        # (b) Head Line: mid transverse zone (-0.38 to +0.20), central/radial palm
+        # Spans across mid-palm from radial margin towards ulnar/moon zone
+        # Accommodates diagonal descent near radial notch (u <= -0.25) where it originates
         s_head = 0.0
-        if -0.38 <= ry <= +0.18 and dx >= dy * 0.75 and abs(u) <= 0.85:
+        min_dx_ratio = 0.40 if u <= -0.25 else 0.70
+        if -0.38 <= ry <= +0.20 and dx >= dy * min_dx_ratio and abs(u) <= 0.85:
             z_score = max(0.0, 1.0 - abs(ry - (-0.10)) / 0.28)
-            t_score = min(1.0, (dx / max(dy * 0.7, 1.0)) / 1.5)
-            span_score = min(1.0, dx / (0.50 * float(palm_radius)))
-            l_score = min(1.0, l / (0.50 * float(palm_radius)))
-            rad_boost = 1.20 if u <= 0.10 else 0.85
+            t_score = min(1.0, (dx / max(dy * 0.60, 1.0)) / 1.5)
+            span_score = min(1.0, dx / (0.45 * float(palm_radius)))
+            l_score = min(1.0, l / (0.45 * float(palm_radius)))
+            rad_boost = 1.25 if u <= 0.10 else 0.85
             s_head = (0.30 * z_score + 0.25 * span_score + 0.25 * t_score + 0.20 * l_score) * rad_boost
 
-        # (c) Fate Line: central column (|u| <= 0.22), longitudinal verticality
+        # (c) Fate Line: central column (|u| <= 0.20), longitudinal verticality
         s_fate = 0.0
-        if abs(u) <= 0.22 and dy >= 1.20 * dx and dx <= 0.45 * float(palm_radius) and -0.35 <= ry <= +0.85:
-            c_score = max(0.0, 1.0 - abs(u) / 0.22)
-            v_score = min(1.0, dy / max(dx * 1.2, 1.0))
-            l_score = min(1.0, l / (0.40 * float(palm_radius)))
+        if abs(u) <= 0.20 and dy >= 1.40 * dx and dx <= 0.40 * float(palm_radius) and -0.35 <= ry <= +0.85:
+            c_score = max(0.0, 1.0 - abs(u) / 0.20)
+            v_score = min(1.0, dy / max(dx * 1.40, 1.0))
+            l_score = min(1.0, l / (0.45 * float(palm_radius)))
             s_fate = 0.40 * c_score + 0.40 * v_score + 0.20 * l_score
 
         # (d) Life Line: Thenar radial zone encircling Venus mount
-        # STRICT DISAMBIGUATION: Central vertical segments (|u| <= 0.16 and dy >= 1.2 * dx)
-        # are reserved for the Fate Line and penalized from Life Line attribution
+        # Runs from radial cleft (u <= -0.15, ry ~ -0.30) curving down to wrist base (u ~ -0.10, ry ~ 0.90)
         s_life = 0.0
-        is_central_vertical = (abs(u) <= 0.16 and dy >= 1.20 * dx)
-        if not is_central_vertical and u <= -0.10 and -0.35 <= ry <= +1.15:
-            u_score = max(0.0, 1.0 - abs(u - (-0.55)) / 0.55)
-            z_score = max(0.0, 1.0 - abs(ry - 0.35) / 0.60)
-            arc_shape_score = min(1.0, (dy + dx * 0.50) / (0.45 * float(palm_radius)))
-            l_score = min(1.0, l / (0.40 * float(palm_radius)))
+        is_central_vertical = (abs(u) <= 0.15 and dy >= 1.25 * dx)
+        if not is_central_vertical and u <= -0.05 and -0.40 <= ry <= +1.15:
+            u_score = max(0.0, 1.0 - abs(u - (-0.45)) / 0.50)
+            z_score = max(0.0, 1.0 - abs(ry - 0.25) / 0.65)
+            arc_shape_score = min(1.0, (dy + dx * 0.60) / (0.40 * float(palm_radius)))
+            l_score = min(1.0, l / (0.35 * float(palm_radius)))
             s_life = 0.35 * u_score + 0.30 * z_score + 0.20 * arc_shape_score + 0.15 * l_score
 
         candidate_scores.append({
@@ -920,6 +1241,23 @@ def analyze_palm_creases(
             'life': s_life,
             'fate': s_fate
         })
+
+    # --- Simian Crease (Single Transverse Palmar Crease) Topological Detection ---
+    transverse_candidates = []
+    palm_width_px = max(1.0, float(palm_radius * 2.0))
+    for c in candidate_scores:
+        seg = c['seg']
+        p = seg['path']
+        s_dx = float(np.ptp(p[:, 0]))
+        s_dy = float(np.ptp(p[:, 1]))
+        s_ry = float(np.mean(p[:, 1]) - palm_cy) / float(palm_radius)
+        if s_dx >= s_dy * 1.15 and s_dx >= 0.35 * palm_width_px and -0.70 <= s_ry <= +0.20:
+            transverse_candidates.append({'c': c, 'dx': s_dx, 'ry': s_ry, 'seg': seg})
+
+    dominant_simian = [t for t in transverse_candidates if t['dx'] >= 0.58 * palm_width_px and -0.55 <= t['ry'] <= -0.15]
+    secondary_trans = [t for t in transverse_candidates if t not in dominant_simian and t['dx'] >= 0.38 * palm_width_px]
+    is_simian_crease = (len(dominant_simian) == 1 and len(secondary_trans) == 0)
+    simian_seg = dominant_simian[0]['seg'] if is_simian_crease else None
 
     # Greedily assign primary segments with prioritized disambiguation order:
     # 'fate' & 'head' are evaluated first to protect the central-vertical and mid-transverse axes,
@@ -932,10 +1270,19 @@ def analyze_palm_creases(
         if not unassigned:
             continue
         best_cand = max(unassigned, key=lambda c: c[line_key])
-        min_thresh = 0.20
+        min_thresh = 0.35 if line_key == 'fate' else 0.20
         if best_cand[line_key] >= min_thresh:
             crease_segs[line_key].append(best_cand['seg'])
             assigned_segs.add(best_cand['idx'])
+
+        # Multi-segment harvesting for transverse lines (Heart & Head) to allow bridging disjoint fragments
+        if line_key in ('heart', 'head', 'life'):
+            for c in unassigned:
+                if c['idx'] not in assigned_segs and c[line_key] >= 0.22:
+                    other_max = max([c[k] for k in ['fate', 'head', 'life', 'heart'] if k != line_key], default=0.0)
+                    if c[line_key] >= other_max * 0.90:
+                        crease_segs[line_key].append(c['seg'])
+                        assigned_segs.add(c['idx'])
 
     # Find collinear extensions among remaining segments with dynamic chaining, bridge collinearity & line-specific curvature tolerance
     for line_key in ['fate', 'head', 'life', 'heart']:
@@ -994,8 +1341,13 @@ def analyze_palm_creases(
                                     m_dx = float(np.ptp(cand_merged[:, 0]))
                                     m_dy = float(np.ptp(cand_merged[:, 1]))
                                     # Enforce orientation preservation (transverse vs longitudinal)
-                                    if line_key in ['head', 'heart'] and m_dy > m_dx * 0.90:
+                                    if line_key == 'heart' and m_dy > m_dx * 1.35:
                                         continue
+                                    if line_key == 'head':
+                                        head_u = float(c['seg']['canonical_u'])
+                                        max_h_slope = 1.35 if head_u <= -0.25 else 0.90
+                                        if m_dy > m_dx * max_h_slope:
+                                            continue
                                     if line_key == 'fate' and m_dx > m_dy * 0.85:
                                         continue
                                     diffs_m = np.diff(cand_merged, axis=0)
@@ -1034,7 +1386,7 @@ def analyze_palm_creases(
 
         raw_paths = [s['path'] for s in sorted(segs, key=lambda s: s['arc_length'], reverse=True)]
         max_curv = 2.60 if line_type == "life" else 1.80
-        max_gap = max(28.0, float(palm_radius * (0.35 if line_type == "life" else 0.28)))
+        max_gap = max(32.0, float(palm_radius * (0.35 if line_type == "life" else 0.32)))
         linked = _link_collinear_segments_tangential(
             raw_paths,
             max_gap_px=max_gap,
@@ -1043,14 +1395,37 @@ def analyze_palm_creases(
             min_cos_bridge=0.25 if line_type == "life" else 0.30
         )
 
-        # Change 2: Minimum-cost-path gap bridging in the heart zone
-        if line_type == "heart" and len(linked) >= 2:
-            max_bridge_gap = max(35.0, float(palm_radius * 0.40))
-            bridged_chain = _bridge_heart_zone_gap_min_cost(linked[0], linked[1], crease_map, max_bridge_gap)
-            if bridged_chain is not None:
-                primary_chain = bridged_chain
-            else:
-                primary_chain = linked[0]
+        # Minimum-cost-path gap bridging for transverse lines (Heart & Head) and Thenar C-arc linking for Life Line
+        if line_type in ("heart", "head") and len(linked) >= 2:
+            chains = sorted(linked, key=lambda ch: float(np.mean(ch[:, 0])))
+            curr_chain = chains[0]
+            max_bridge_gap = max(50.0, float(palm_radius * (0.65 if line_type == "heart" else 0.55)))
+            for nxt_chain in chains[1:]:
+                x1_min, x1_max = float(np.min(curr_chain[:, 0])), float(np.max(curr_chain[:, 0]))
+                x2_min, x2_max = float(np.min(nxt_chain[:, 0])), float(np.max(nxt_chain[:, 0]))
+                overlap = max(0.0, min(x1_max, x2_max) - max(x1_min, x2_min))
+                if overlap < 0.40 * min(x1_max - x1_min, x2_max - x2_min, 100.0):
+                    bridged = _bridge_heart_zone_gap_min_cost(curr_chain, nxt_chain, crease_map, max_bridge_gap)
+                    if bridged is not None:
+                        curr_chain = bridged
+            primary_chain = curr_chain
+        elif line_type == "life" and len(raw_paths) >= 2:
+            # Sort segments along thenar curvature from proximal notch to wrist
+            ordered_segments = []
+            for seg in raw_paths:
+                s_down = seg if seg[-1, 1] >= seg[0, 1] else seg[::-1]
+                ordered_segments.append(s_down)
+            ordered_segments.sort(key=lambda s: float(np.min(s[:, 1])))
+
+            combined_life = ordered_segments[0]
+            max_life_gap = max(45.0, float(palm_radius * 0.65))
+            for next_seg in ordered_segments[1:]:
+                last_pt = combined_life[-1]
+                first_pt = next_seg[0]
+                gap = float(np.hypot(first_pt[0] - last_pt[0], first_pt[1] - last_pt[1]))
+                if gap <= max_life_gap and next_seg[-1, 1] >= combined_life[0, 1] + 8.0:
+                    combined_life = np.vstack([combined_life, next_seg])
+            primary_chain = combined_life if len(combined_life) > len(linked[0] if linked else raw_paths[0]) else (linked[0] if linked else raw_paths[0])
         else:
             primary_chain = linked[0] if linked else raw_paths[0]
 
@@ -1081,30 +1456,67 @@ def analyze_palm_creases(
         raw_chord_len = float(np.hypot(primary_chain[-1, 0] - primary_chain[0, 0], primary_chain[-1, 1] - primary_chain[0, 1]))
         raw_curv = round(float(raw_arc_len / max(raw_chord_len, 1.0)), 2)
 
-        # In Fate Line, if length < 0.28 * palm_radius or curvature > 1.45, it is clinically absent/subtle
-        if line_type == "fate" and (raw_arc_len < 0.28 * float(palm_radius) or raw_curv > 1.45):
-            return CreaseFeature(
-                name=name,
-                status="not_detected",
-                path=[],
-                pixel_path=[],
-                measurements={
-                    "arc_length_px": round(raw_arc_len, 1),
-                    "curvature_index": raw_curv,
-                    "visual_prominence": "absent"
-                },
-                detector_version=DETECTOR_VERSION,
-                quality_score=0.0,
-                confidence=None,
-                uncertainty_factors=["fate_line_subtle_or_absent"],
-                failure_reason="Fate line is subtle, fragmentary, or absent (standard palmar variation).",
-                confidence_explanation="Central longitudinal Saturn line did not meet the continuous biometric prominence threshold."
-            )
+        xs_raw = np.clip(primary_chain[:, 0].astype(int), 0, w - 1)
+        ys_raw = np.clip(primary_chain[:, 1].astype(int), 0, h - 1)
+        quality_score = round(float(np.mean(crease_map[ys_raw, xs_raw])) / 255.0, 3)
+
+        if line_type == "fate":
+            # Continuous Probabilistic Weighted Scoring for Fate Line
+            s_vert = min(1.0, float(np.ptp(primary_chain[:, 1])) / max(float(np.ptp(primary_chain[:, 0])) * 1.25, 1.0))
+            if lms_data is not None and getattr(lms_data, "saturn_axis_vector", None):
+                sat_vx, sat_vy = lms_data.saturn_axis_vector
+                seg_vx = float(primary_chain[-1, 0] - primary_chain[0, 0])
+                seg_vy = float(primary_chain[-1, 1] - primary_chain[0, 1])
+                seg_mag = max(math.hypot(seg_vx, seg_vy), 1e-4)
+                cos_sat = abs((seg_vx * sat_vx + seg_vy * sat_vy) / seg_mag)
+                s_saturn = min(1.0, cos_sat * 1.15)
+            else:
+                s_saturn = s_vert
+            u_center = float(np.mean(primary_chain[:, 0] - palm_cx)) / float(palm_radius)
+            s_central = max(0.0, 1.0 - abs(u_center) / 0.22)
+            s_len = min(1.0, raw_arc_len / (0.42 * float(palm_radius)))
+            s_contrast = min(1.0, quality_score * 4.0)
+
+            fate_weighted_score = round(0.30 * s_saturn + 0.25 * s_vert + 0.20 * s_central + 0.15 * s_len + 0.10 * s_contrast, 2)
+            is_detected = (fate_weighted_score >= 0.55 and raw_curv <= 1.35 and quality_score >= 0.10)
+            is_subtle = (0.28 <= fate_weighted_score < 0.55 or (fate_weighted_score >= 0.55 and raw_curv > 1.35))
+
+            if not is_detected:
+                return CreaseFeature(
+                    name=name,
+                    status="not_detected",
+                    path=[],
+                    pixel_path=[],
+                    measurements={
+                        "arc_length_px": round(raw_arc_len, 1),
+                        "curvature_index": raw_curv,
+                        "curvature": raw_curv,
+                        "fate_score": fate_weighted_score,
+                        "subtle_fluid_column": is_subtle,
+                        "reading_variant": "self_made_destiny"
+                    },
+                    detector_version=DETECTOR_VERSION,
+                    quality_score=quality_score,
+                    confidence=fate_weighted_score,
+                    uncertainty_factors=["subtle_central_column" if is_subtle else "absent_central_column"],
+                    failure_reason="Fate line is subtle, fluid, or absent (Self-Made Destiny / Swatantra Karma).",
+                    confidence_explanation=f"Weighted biometric certainty: {fate_weighted_score} (continuous score; < 0.55 indicates fluid career path)."
+                )
 
         sampled_pts = _resample_polyline_by_arclength(primary_chain, target_count=22)
 
         norm_path = [Point2D(x=round(float(p[0] / w), 4), y=round(float(p[1] / h), 4)) for p in sampled_pts]
         pixel_path = [Point2D(x=round(float(p[0]), 1), y=round(float(p[1]), 1)) for p in sampled_pts]
+
+        # Stage 1: Parametric Cubic Bézier Fitting
+        bezier_pts = _fit_cubic_bezier(sampled_pts)
+        bezier_control_points = [
+            Point2D(x=round(float(cp[0] / w), 4), y=round(float(cp[1] / h), 4))
+            for cp in bezier_pts
+        ]
+
+        # Stage 1: Orthogonal Cross-Sectional Ridge Profiling
+        valley_profile = _profile_cross_sectional_valley(gray_work, sampled_pts)
 
         arc_len, chord_len = _compute_smoothed_arclength(sampled_pts, smoothing_passes=2)
         palm_width_px = max(1.0, float(palm_radius * 2.0))
@@ -1149,6 +1561,7 @@ def analyze_palm_creases(
             status=status,
             path=norm_path,
             pixel_path=pixel_path,
+            bezier_control_points=bezier_control_points,
             measurements={
                 "length_ratio": length_ratio,
                 "curvature_index": curvature_index,
@@ -1156,8 +1569,15 @@ def analyze_palm_creases(
                 "orientation_angle_deg": orientation_angle,
                 "arc_length_px": round(arc_len, 1),
                 "chord_length_px": round(chord_len, 1),
+                "tortuosity": round(float(arc_len / max(chord_len, 1.0)), 3),
+                "anatomical_length_ratio": length_ratio,
                 "sample_points_count": len(norm_path),
-                "visual_prominence": prominence
+                "visual_prominence": prominence,
+                "valley_depth_px": valley_profile["valley_depth_px"],
+                "relative_depth": valley_profile["relative_depth"],
+                "continuity_ratio": valley_profile["continuity_ratio"],
+                "detected_breaks": valley_profile["detected_breaks"],
+                "detected_forks": valley_profile["detected_forks"]
             },
             detector_version=DETECTOR_VERSION,
             quality_score=quality_score,
@@ -1173,7 +1593,8 @@ def analyze_palm_creases(
         h_side: str,
         palm_cx: float = 0.0,
         palm_cy: float = 0.0,
-        palm_radius: float = 0.0
+        palm_radius: float = 0.0,
+        lms: Optional[HandLandmarksData] = None
     ) -> MountTopography:
         """
         Estimates 2D photometric surface skin contrast across palmar regions.
@@ -1194,6 +1615,14 @@ def analyze_palm_creases(
         g_mean = float(np.mean(skin_pts)) if len(skin_pts) > 0 else 128.0
         g_std = float(np.std(skin_pts)) if len(skin_pts) > 0 else 30.0
 
+        # Ambient lighting gradient compensation (cancels directional side-lamp bias)
+        smooth_illum = cv2.GaussianBlur(small_gray, (25, 25), 0)
+        grad_x = cv2.Sobel(smooth_illum, cv2.CV_32F, 1, 0, ksize=3, scale=1.0 / 8.0)
+        grad_y = cv2.Sobel(smooth_illum, cv2.CV_32F, 0, 1, ksize=3, scale=1.0 / 8.0)
+        valid_mask = (small_mask > 0)
+        mean_gx = float(np.mean(grad_x[valid_mask])) if np.any(valid_mask) else 0.0
+        mean_gy = float(np.mean(grad_y[valid_mask])) if np.any(valid_mask) else 0.0
+
         is_l = (h_side == "left")
 
         # Dynamically anchor mount sampling zones relative to palm center & radius if available,
@@ -1205,41 +1634,43 @@ def analyze_palm_creases(
 
             if is_l:
                 # Left Palm: Thumb/Thenar is on the right (+u), Little/Hypothenar is on the left (-u)
+                # Sub-digital mounts sit squarely on the palmar pad between MCP knuckles and Heart Line
                 zones_rel = {
-                    "jupiter": (scy - 0.90 * srad, scx + 0.25 * srad, scy - 0.40 * srad, scx + 0.75 * srad, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
-                    "saturn": (scy - 0.95 * srad, scx - 0.20 * srad, scy - 0.45 * srad, scx + 0.25 * srad, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
-                    "apollo": (scy - 0.90 * srad, scx - 0.65 * srad, scy - 0.40 * srad, scx - 0.20 * srad, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and authentic expression"),
-                    "mercury": (scy - 0.80 * srad, scx - 1.05 * srad, scy - 0.30 * srad, scx - 0.65 * srad, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
-                    "venus": (scy - 0.10 * srad, scx + 0.15 * srad, scy + 0.85 * srad, scx + 1.00 * srad, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
-                    "moon": (scy + 0.10 * srad, scx - 1.00 * srad, scy + 0.95 * srad, scx - 0.20 * srad, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
+                    "jupiter": (scy - 0.70 * srad, scx + 0.25 * srad, scy - 0.35 * srad, scx + 0.75 * srad, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
+                    "saturn": (scy - 0.75 * srad, scx - 0.20 * srad, scy - 0.38 * srad, scx + 0.25 * srad, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
+                    "apollo": (scy - 0.72 * srad, scx - 0.65 * srad, scy - 0.35 * srad, scx - 0.20 * srad, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and charismatic warmth"),
+                    "mercury": (scy - 0.65 * srad, scx - 1.05 * srad, scy - 0.25 * srad, scx - 0.65 * srad, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
+                    "venus": (scy - 0.10 * srad, scx + 0.15 * srad, scy + 0.80 * srad, scx + 0.95 * srad, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
+                    "moon": (scy + 0.10 * srad, scx - 0.95 * srad, scy + 0.90 * srad, scx - 0.20 * srad, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
                 }
             else:
                 # Right Palm: Thumb/Thenar is on the left (-u), Little/Hypothenar is on the right (+u)
+                # Sub-digital mounts sit squarely on the palmar pad between MCP knuckles and Heart Line
                 zones_rel = {
-                    "jupiter": (scy - 0.90 * srad, scx - 0.75 * srad, scy - 0.40 * srad, scx - 0.25 * srad, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
-                    "saturn": (scy - 0.95 * srad, scx - 0.25 * srad, scy - 0.45 * srad, scx + 0.20 * srad, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
-                    "apollo": (scy - 0.90 * srad, scx + 0.20 * srad, scy - 0.40 * srad, scx + 0.65 * srad, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and authentic expression"),
-                    "mercury": (scy - 0.80 * srad, scx + 0.65 * srad, scy - 0.30 * srad, scx + 1.05 * srad, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
-                    "venus": (scy - 0.10 * srad, scx - 1.00 * srad, scy + 0.85 * srad, scx - 0.15 * srad, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
-                    "moon": (scy + 0.10 * srad, scx + 0.20 * srad, scy + 0.95 * srad, scx + 1.00 * srad, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
+                    "jupiter": (scy - 0.70 * srad, scx - 0.75 * srad, scy - 0.35 * srad, scx - 0.25 * srad, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
+                    "saturn": (scy - 0.75 * srad, scx - 0.25 * srad, scy - 0.38 * srad, scx + 0.20 * srad, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
+                    "apollo": (scy - 0.72 * srad, scx + 0.20 * srad, scy - 0.35 * srad, scx + 0.65 * srad, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and charismatic warmth"),
+                    "mercury": (scy - 0.65 * srad, scx + 0.65 * srad, scy - 0.25 * srad, scx + 1.05 * srad, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
+                    "venus": (scy - 0.10 * srad, scx - 0.95 * srad, scy + 0.80 * srad, scx - 0.15 * srad, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
+                    "moon": (scy + 0.10 * srad, scx + 0.20 * srad, scy + 0.90 * srad, scx + 0.95 * srad, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
                 }
             zones = {k: (v[0]/small_h, v[1]/small_w, v[2]/small_h, v[3]/small_w, v[4], v[5]) for k, v in zones_rel.items()}
         else:
             if is_l:
                 zones = {
-                    "jupiter": (0.16, 0.58, 0.32, 0.76, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
-                    "saturn": (0.15, 0.42, 0.30, 0.58, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
-                    "apollo": (0.16, 0.26, 0.32, 0.44, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and authentic expression"),
-                    "mercury": (0.20, 0.10, 0.38, 0.28, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
+                    "jupiter": (0.28, 0.58, 0.44, 0.76, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
+                    "saturn": (0.26, 0.42, 0.42, 0.58, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
+                    "apollo": (0.28, 0.26, 0.44, 0.44, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and charismatic warmth"),
+                    "mercury": (0.32, 0.10, 0.48, 0.28, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
                     "venus": (0.48, 0.55, 0.86, 0.88, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
                     "moon": (0.52, 0.08, 0.90, 0.38, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
                 }
             else:
                 zones = {
-                    "jupiter": (0.16, 0.24, 0.32, 0.42, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
-                    "saturn": (0.15, 0.42, 0.30, 0.58, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
-                    "apollo": (0.16, 0.56, 0.32, 0.74, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and authentic expression"),
-                    "mercury": (0.20, 0.72, 0.38, 0.90, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
+                    "jupiter": (0.28, 0.24, 0.44, 0.42, "Mount of Jupiter", "Executive ambition, visionary leadership, and social presence"),
+                    "saturn": (0.26, 0.42, 0.42, 0.58, "Mount of Saturn", "Contemplative discipline, ethical depth, and vocational grounding"),
+                    "apollo": (0.28, 0.56, 0.44, 0.74, "Mount of Apollo (Sun)", "Creative charisma, aesthetic appreciation, and charismatic warmth"),
+                    "mercury": (0.32, 0.72, 0.48, 0.90, "Mount of Mercury", "Agile communication, commercial acumen, and intellectual speed"),
                     "venus": (0.48, 0.12, 0.86, 0.45, "Mount of Venus (Thenar)", "Vital constitutional stamina, warmth, empathy, and sensory vitality"),
                     "moon": (0.52, 0.62, 0.90, 0.92, "Mount of Moon (Hypothenar)", "Subconscious intuition, imaginative creativity, and inner tranquility"),
                 }
@@ -1272,9 +1703,33 @@ def analyze_palm_creases(
                 border_mean = float(np.mean(border_vals)) if len(border_vals) > 0 else center_val
                 convexity = (center_val - border_mean) / 25.0
                 
-                lum_diff = (m_lum - g_mean) / (max(g_std, 1.0) * 2.0)
-                elev = 0.50 + lum_diff * 0.25 + np.clip(convexity * 0.15, -0.20, 0.20)
-                elev = float(np.clip(round(elev, 2), 0.25, 0.88))
+                # Directional shading bias compensation
+                rel_x_px = (float(np.mean([xmin, xmax])) * small_w - scx)
+                rel_y_px = (float(np.mean([ymin, ymax])) * small_h - scy)
+                shading_bias = (rel_x_px * mean_gx + rel_y_px * mean_gy)
+                compensated_lum = m_lum - shading_bias
+
+                lum_diff = (compensated_lum - g_mean) / (max(g_std, 1.0) * 2.0)
+                
+                # Depth relief from 3D hand mesh if available
+                depth_relief = 0.0
+                m_conf = 0.88
+                if lms is not None and getattr(lms, "dynamic_mount_rois", None):
+                    dyn_roi = lms.dynamic_mount_rois.get(m_k)
+                    if dyn_roi is not None:
+                        center_z = (lms.landmarks_3d[0][2] + lms.landmarks_3d[9][2]) / 2.0
+                        depth_relief = -float(dyn_roi.depth_z - center_z)
+                        m_conf = dyn_roi.confidence
+
+                depth_comp = np.clip(depth_relief * 0.80, -0.15, 0.15)
+
+                if m_k == "venus":
+                    thenar_boost = 0.20 if valid.sum() > 20 else 0.10
+                    elev = 0.56 + lum_diff * 0.15 + np.clip(convexity * 0.15, -0.10, 0.20) + depth_comp + thenar_boost
+                    elev = float(np.clip(round(elev, 2), 0.50, 0.88))
+                else:
+                    elev = 0.50 + lum_diff * 0.20 + np.clip(convexity * 0.15, -0.20, 0.20) + depth_comp
+                    elev = float(np.clip(round(elev, 2), 0.25, 0.88))
             else:
                 defaults = {"jupiter": 0.52, "saturn": 0.48, "apollo": 0.50, "mercury": 0.49, "venus": 0.62, "moon": 0.54}
                 elev = defaults.get(m_k, 0.50)
@@ -1288,11 +1743,18 @@ def analyze_palm_creases(
             else:
                 prom = "flat"
 
+            m_cx = float(np.clip((xmin + xmax) / 2.0, 0.05, 0.95))
+            m_cy = float(np.clip((ymin + ymax) / 2.0, 0.05, 0.95))
+            m_rad = float(np.clip(((xmax - xmin) + (ymax - ymin)) / 4.0, 0.03, 0.20))
+
             m_contours[m_k] = MountContour(
                 name=d_name,
                 relative_elevation=elev,
                 prominence=prom,
-                symbolic_significance=meaning
+                symbolic_significance=meaning,
+                center=Point2D(x=round(m_cx, 4), y=round(m_cy, 4)),
+                radius=round(m_rad, 4),
+                confidence=m_conf if 'm_conf' in locals() else 0.88
             )
 
         return MountTopography(
@@ -1314,26 +1776,45 @@ def analyze_palm_creases(
         p_rad: float
     ) -> ElementalConstitution:
         h_img, w_img = work_image.shape[:2]
-        y_wrist = min(h_img - 1, int(p_cy + 1.15 * p_rad))
-        y_knuckles = max(0, int(p_cy - 1.15 * p_rad))
-        palm_h = max(1.0, float(y_wrist - y_knuckles))
 
-        row_idx = int(np.clip(p_cy, 0, h_img - 1))
-        row_slice = p_mask[row_idx, :]
-        active_cols = np.where(row_slice > 0)[0]
-        if len(active_cols) >= 10:
-            palm_w = max(1.0, float(active_cols[-1] - active_cols[0]))
+        # Use convexity defect interdigital valleys to identify MCP (knuckle) line
+        cnts_p, _ = cv2.findContours(p_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        valleys = []
+        if cnts_p:
+            c_p = max(cnts_p, key=cv2.contourArea)
+            hull_p = cv2.convexHull(c_p, returnPoints=False)
+            if hull_p is not None and len(hull_p) > 3:
+                try:
+                    def_p = cv2.convexityDefects(c_p, hull_p)
+                    if def_p is not None:
+                        for s, e, f, d in def_p.reshape(-1, 4):
+                            pt = c_p[f][0]
+                            if pt[1] < p_cy and abs(pt[0] - p_cx) < 1.6 * p_rad and (d / 256.0) > 15:
+                                valleys.append(pt[1])
+                except Exception:
+                    pass
+
+        y_mcp = float(np.mean(valleys)) if len(valleys) >= 2 else (p_cy - 0.95 * p_rad)
+        y_wrist = min(float(h_img - 1), p_cy + 1.10 * p_rad)
+        palm_h = max(1.0, y_wrist - y_mcp)
+
+        # Metacarpal palm width sampled across transverse arch (excluding abducted thumb)
+        y_arch = int(np.clip(p_cy - 0.35 * p_rad, 0, h_img - 1))
+        cols_arch = np.where(p_mask[y_arch, :] > 0)[0]
+        cols_palm = [x for x in cols_arch if abs(x - p_cx) <= 1.35 * p_rad]
+        if len(cols_palm) >= 10:
+            palm_w = max(1.0, float(cols_palm[-1] - cols_palm[0]))
         else:
-            palm_w = max(1.0, float(p_rad * 2.30))
+            palm_w = max(1.0, float(p_rad * 2.05))
 
         palm_aspect = round(float(palm_h / palm_w), 2)
 
         mask_ys, _ = np.where(p_mask > 0)
         if len(mask_ys) > 50:
             top_y = float(np.min(mask_ys))
-            digit_len = max(0.0, float(y_knuckles - top_y))
+            digit_len = max(0.0, float(y_mcp - top_y))
         else:
-            digit_len = float(p_rad * 1.70)
+            digit_len = float(p_rad * 1.50)
 
         digit_ratio = round(float(digit_len / max(palm_h, 1.0)), 2)
 
@@ -1354,8 +1835,8 @@ def analyze_palm_creases(
         else:
             skin_tex = "medium"
 
-        is_square = (palm_aspect <= 1.12)
-        is_short = (digit_ratio <= 0.78)
+        is_square = (palm_aspect <= 1.05)
+        is_short = (digit_ratio <= 0.85)
 
         if is_square and is_short:
             h_type = "earth"
@@ -1464,6 +1945,11 @@ def analyze_palm_creases(
                 )
                 feat.path = [Point2D(x=round(p[0], 4), y=round(p[1], 4)) for p in inv_norm]
                 feat.pixel_path = [Point2D(x=round(p[0] * w, 1), y=round(p[1] * h, 1)) for p in inv_norm]
+            if feat is not None and feat.bezier_control_points:
+                inv_bez = _invert_rotate_points(
+                    [(p.x, p.y) for p in feat.bezier_control_points], rectify_angle, w, h, center=(palm_cx, palm_cy)
+                )
+                feat.bezier_control_points = [Point2D(x=round(p[0], 4), y=round(p[1], 4)) for p in inv_bez]
 
     # 8. Head / Life Origin Interplay Analysis
     palm_width_px = max(1.0, float(palm_radius * 2.0))
@@ -1489,6 +1975,14 @@ def analyze_palm_creases(
             h_orig = h_start
             d_orig_px = d_start
 
+        # Check proximal vertex proximity between head line origin and life line origin in first web space
+        min_prox_d = min(
+            math.hypot(hp.x - lp.x, hp.y - lp.y)
+            for hp in head_feat.pixel_path[:4]
+            for lp in life_feat.pixel_path[:4]
+        )
+        d_orig_px = min(d_orig_px, min_prox_d)
+
         origin_ratio = round(float(d_orig_px / palm_width_px), 3)
 
         # Three-zone classification with deadband [0.08, 0.13]
@@ -1510,8 +2004,23 @@ def analyze_palm_creases(
         if life_feat.measurements is not None:
             life_feat.measurements["origin_status"] = orig_status
 
-    mounts = _estimate_skin_contrast(work_img, work_mask, hand_side, palm_cx, palm_cy, palm_radius)
+    mounts = _estimate_skin_contrast(work_img, work_mask, hand_side, palm_cx, palm_cy, palm_radius, lms=lms_data)
+    if abs(rectify_angle) >= 1.0 and mounts is not None:
+        for m_k in ["jupiter", "saturn", "apollo", "mercury", "venus", "moon"]:
+            m_obj = getattr(mounts, m_k, None)
+            if m_obj is not None and m_obj.center is not None:
+                inv_m = _invert_rotate_points(
+                    [(m_obj.center.x, m_obj.center.y)], rectify_angle, w, h, center=(palm_cx, palm_cy)
+                )
+                m_obj.center = Point2D(x=round(inv_m[0][0], 4), y=round(inv_m[0][1], 4))
+
     constitution = _classify_elemental_constitution(work_img, work_mask, palm_cx, palm_cy, palm_radius)
+
+    valid_confs = [
+        f.confidence for f in [heart_feat, head_feat, life_feat, fate_feat]
+        if f is not None and f.confidence is not None
+    ]
+    overall_conf = round(float(np.mean(valid_confs)), 2) if valid_confs else 0.85
 
     palm_features = PalmFeatures(
         heart_line=heart_feat,
@@ -1520,7 +2029,11 @@ def analyze_palm_creases(
         fate_line=fate_feat,
         hand_side=hand_side,
         mount_topography=mounts,
-        elemental_constitution=constitution
+        elemental_constitution=constitution,
+        landmarks=[Point2D(x=round(p[0], 4), y=round(p[1], 4)) for p in lms_data.landmarks_norm] if lms_data else None,
+        landmarks_confidence=lms_data.detection_confidence if lms_data else 0.70,
+        hand_side_confidence=lms_data.handedness_confidence if lms_data else 0.85,
+        overall_confidence=overall_conf
     )
 
     return palm_features, hand_side, roi_box
