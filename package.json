@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "pnpm --filter @palmora/shared-types run build && pnpm --filter @palmora/web run build",
+    "build": "pnpm --filter @palmora/shared-types run build && pnpm --filter @palmora/web run build && node scripts/prepare-vercel.cjs",
     "build:types": "npm --workspace=@palmora/shared-types run build",
     "check:types": "npm --workspace=@palmora/shared-types run check:types && npm --workspace=@palmora/web run check:types",
     "dev:web": "npm --workspace=@palmora/web run dev",
@@ -16,5 +16,8 @@
     "test:web": "npm --workspace=@palmora/web test",
     "test:e2e": "npm --workspace=@palmora/web run test:e2e",
     "test": "npm run test:web"
+  },
+  "devDependencies": {
+    "next": "16.4.3"
   }
 }

@@ -11,6 +11,7 @@ __pycache__/
 node_modules/
 .next/
 dist/
+!packages/shared-types/dist/
 build/
 *.log
 

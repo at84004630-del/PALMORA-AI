@@ -1,6 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
-  "buildCommand": "pnpm --filter @palmora/shared-types run build && pnpm --filter @palmora/web run build",
-  "outputDirectory": "apps/web/.next"
+  "buildCommand": "pnpm --filter @palmora/shared-types run build && pnpm --filter @palmora/web run build && node scripts/prepare-vercel.cjs"
 }
