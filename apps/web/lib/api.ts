@@ -85,7 +85,9 @@ export type {
   HabitAlignmentSummary,
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL !== undefined ? process.env.NEXT_PUBLIC_API_URL : 'http://localhost:8000';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL !== undefined && process.env.NEXT_PUBLIC_API_URL !== '')
+  ? process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '')
+  : (typeof window !== 'undefined' ? '' : 'http://localhost:8000');
 
 export function formatApiErrorMessage(error: unknown): string {
   if (!error) return 'An unexpected error occurred. Please try again.';
