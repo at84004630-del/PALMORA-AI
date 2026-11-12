@@ -13,7 +13,6 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@palmora/shared-types": "*",
     "lucide-react": "^1.55.0",
     "next": "16.4.3",
     "react": "19.3.0",

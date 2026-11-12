@@ -20,7 +20,7 @@
     ],
     "paths": {
       "@/*": ["./*"],
-      "@palmora/shared-types": ["../../packages/shared-types/src/index.ts"]
+      "@palmora/shared-types": ["./types/shared.ts"]
     }
   },
   "include": [
