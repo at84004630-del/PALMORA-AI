@@ -13,6 +13,7 @@ node_modules/
 dist/
 !packages/shared-types/dist/
 build/
+public/
 *.log
 
 # Environment & secrets
