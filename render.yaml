@@ -30,3 +30,4 @@ services:
           type: web
           name: palmora-api
           property: host
+

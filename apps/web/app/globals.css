@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+@theme {
+  --color-gold-primary: #C8AA6E;
+  --color-gold-glow: #F2DA9D;
+  --color-violet-glow: #7C3AED;
+  --color-midnight-card: #0D1122;
+  --color-midnight-border: rgba(200, 170, 110, 0.2);
+  --color-background-100: #070913;
+}
+
 :root {
   --background: #070913;
   --foreground: #F1F4F9;
